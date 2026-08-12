@@ -485,7 +485,9 @@ body.is-mobile #list { padding: 4px 4px 80px; }
   const isStandalone = window.matchMedia('(display-mode: standalone)').matches
                     || !!window.Capacitor
                     || location.protocol === 'capacitor:';
-  if(isStandalone) document.body.classList.add('is-mobile');
+  // 설치된 앱/PWA가 아니어도 화면 폭이 좁으면(일반 모바일 브라우저 탭) 모바일 레이아웃 적용
+  const isNarrow = Math.min(window.innerWidth, window.screen?.width || window.innerWidth) < 480;
+  if(isStandalone || isNarrow) document.body.classList.add('is-mobile');
 })();
 
 /* 서비스 워커: 로컬 서버는 SW 전체 해제, 원격(APK)만 등록 */
