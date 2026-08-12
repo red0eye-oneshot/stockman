@@ -1,0 +1,27 @@
+*.msi
+*.exe
+node_modules/
+android/build/
+android/.gradle/
+build_log.txt
+*.xlsx
+
+# ── 절대 커밋 금지: 서명키·개인 데이터 ──────────────────
+android.keystore
+*.keystore
+*.jks
+*.apk
+*.aab
+*.idsig
+portfolio.json
+
+# ── 빌드 산출물 / 로그 (레포에 불필요) ─────────────────
+build/
+.gradle/
+gradle/
+twa-build/
+__pycache__/
+server_log.txt
+py_start.log
+vbs_log.txt
+manifest-checksum.txt

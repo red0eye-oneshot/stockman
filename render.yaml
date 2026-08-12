@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: stock-tracker
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python stock_server.py"
+    envVars:
+      - key: API_KEY
+        generateValue: true   # Render가 안전한 랜덤 키를 자동 생성
+      - key: PYTHON_VERSION
+        value: 3.11.9
