@@ -471,8 +471,9 @@ def _fetch_investor_data_raw(code: str) -> dict:
     except Exception as e:
         _dbg.append(f'frgn.naver ERR: {type(e).__name__}: {e}')
 
-    # C-2) sise_investor.naver → 최근 7거래일 합계 순매수(주)
+    # C-2) sise_investor.naver → 최근 7거래일 합계 순매수(주) + 개인 탭용 일별 수급
     # 컬럼 순서: 개인, 외국인, 기관합계, 금융투자, 보험, 투신, 사모, 은행, 기타금융, 연기금등, 국가, 기타법인
+    indiv_daily = []   # [{'date':..., 'indiv':..., 'frgn':..., 'organ':...}, ...] 개인 탭 표시용
     if not inv:
         SI_COLS = ['개인','외국인','기관합계','금융투자','보험','투신','사모','은행','기타금융','연기금','국가','기타법인']
         try:
@@ -485,22 +486,31 @@ def _fetch_investor_data_raw(code: str) -> dict:
                 _dbg.append(f'  rows: {len(rows_si)}')
                 acc = {}   # 7일 누계
                 days_ok = 0
-                for row in rows_si[:7]:   # 최근 7거래일
+                for row in rows_si[:10]:   # 최근 10거래일 (개인 탭은 조금 더 넉넉히)
+                    date_m = re.search(r'(\d{4}\.\d{2}\.\d{2})', row)
                     spans = re.findall(
                         r'<span[^>]*class="tah[^"]*"[^>]*>\s*([-+0-9,\s]+)\s*</span>',
                         row
                     )
                     spans = [s.strip() for s in spans if s.strip()]
                     if len(spans) >= len(SI_COLS):
-                        for i, col in enumerate(SI_COLS):
-                            try:
-                                acc[col] = acc.get(col, 0) + _parse_int(spans[i])
-                            except Exception:
-                                pass
-                        days_ok += 1
+                        if days_ok < 7:
+                            for i, col in enumerate(SI_COLS):
+                                try:
+                                    acc[col] = acc.get(col, 0) + _parse_int(spans[i])
+                                except Exception:
+                                    pass
+                            days_ok += 1
+                        if date_m:
+                            indiv_daily.append({
+                                'date':  date_m.group(1),
+                                'indiv': _parse_int(spans[0]),
+                                'frgn':  _parse_int(spans[1]),
+                                'organ': _parse_int(spans[2]),
+                            })
                 if days_ok > 0:
                     inv.update(acc)
-                    _dbg.append(f'  sise_investor OK: {days_ok}일 누계 {len(inv)}건')
+                    _dbg.append(f'  sise_investor OK: {days_ok}일 누계 {len(inv)}건, indivDaily {len(indiv_daily)}건')
                 else:
                     _dbg.append('  sise_investor: 유효 행 없음')
         except Exception as e:
@@ -552,7 +562,7 @@ def _fetch_investor_data_raw(code: str) -> dict:
         nk = alias.get(k, k)
         normalized[nk] = normalized.get(nk, 0) + v
 
-    return {'frgnRatio': frgn_ratio, 'investors': normalized, 'invDaily': inv_daily, 'name': stock_name}
+    return {'frgnRatio': frgn_ratio, 'investors': normalized, 'invDaily': inv_daily, 'indivDaily': indiv_daily, 'name': stock_name}
 
 
 
@@ -906,7 +916,7 @@ def get_stock_data(code: str) -> dict:
             try:
                 inv_data = f_inv.result(timeout=30)
             except Exception:
-                inv_data = {'frgnRatio': None, 'investors': {}, 'invDaily': [], 'name': ''}
+                inv_data = {'frgnRatio': None, 'investors': {}, 'invDaily': [], 'indivDaily': [], 'name': ''}
             try:
                 fin_data = f_fin.result(timeout=30)
             except Exception:
@@ -966,6 +976,7 @@ def get_stock_data(code: str) -> dict:
             'frgnRatio': inv_data.get('frgnRatio'),
             'investors': inv_data.get('investors', {}),
             'invDaily':  inv_data.get('invDaily', []),
+            'indivDaily': inv_data.get('indivDaily', []),
             'candles': spark,
             'consensus':          [],
             'consensusAvgTarget': None,

@@ -219,6 +219,9 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .rec-chip{color:#fff;background:rgba(0,199,122,.22);border:1px solid rgba(0,199,122,.6);border-radius:5px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap}
 
 /* ── 외국인·기관 순매매 테이블 ── */
+.inv-tabs{display:flex;gap:4px;margin-bottom:4px}
+.inv-tab{flex:1;font-size:11px;font-weight:700;padding:4px 0;border-radius:6px;border:1px solid var(--brd2);background:var(--surf2);color:var(--txt2);cursor:pointer;transition:all .15s}
+.inv-tab.active{background:var(--acc);color:#fff;border-color:var(--acc)}
 .inv-section{padding:4px 10px 7px;border-top:1px solid var(--brd2)}
 .inv-tbl{width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed}
 .inv-tbl th{font-size:10px;color:var(--gold);font-weight:700;padding:2px 3px;text-align:center;border-bottom:1px solid var(--brd2);white-space:nowrap}
@@ -977,6 +980,51 @@ function apiFetch(url, opts={}) {
   return fetch(url, Object.assign({}, opts, {headers}));
 }
 
+/* ══ 수급 탭 (기관·외국인 / 개인) — 미니카드·관심카드 공용 ══ */
+function _fmtInvN(v){ if(v==null) return '<span class="flat">—</span>'; const c=v>0?'c-up':v<0?'c-dn':'flat'; const s=(v>0?'+':'')+v.toLocaleString('ko-KR'); return `<span class="${c}">${s}</span>`; }
+function _fmtInvH(v){ return v!=null ? v.toLocaleString('ko-KR') : '—'; }
+function _fmtInvD(s){ if(!s) return ''; const p=s.split('.'); return p.length>=3 ? p[1]+'.'+p[2] : s; }
+let _invTabSeq = 0;
+function buildInvTabHtml(daily, indivDaily){
+  daily = daily||[]; indivDaily = indivDaily||[];
+  if(!daily.length && !indivDaily.length) return '';
+  const uid = 'it' + (_invTabSeq++);
+  const ioRows = daily.map(r=>`<tr>
+    <td>${_fmtInvD(r.date)}</td>
+    <td>${_fmtInvN(r.organ)}</td>
+    <td>${_fmtInvN(r.frgn)}</td>
+    <td class="c-hold">${_fmtInvH(r.frgnHold)}</td>
+    <td class="flat">${r.frgnRate!=null ? r.frgnRate.toFixed(2)+'%' : '—'}</td>
+  </tr>`).join('');
+  const inRows = indivDaily.map(r=>`<tr>
+    <td>${_fmtInvD(r.date)}</td>
+    <td>${_fmtInvN(r.indiv)}</td>
+  </tr>`).join('');
+  const ioTable = daily.length
+    ? `<table class="inv-tbl"><thead><tr><th>날짜</th><th>기관</th><th>외국인</th><th>보유주수</th><th>보유율</th></tr></thead><tbody>${ioRows}</tbody></table>`
+    : `<div class="flat" style="font-size:11px;padding:4px 0">데이터 없음</div>`;
+  const inTable = indivDaily.length
+    ? `<table class="inv-tbl"><thead><tr><th>날짜</th><th>개인 순매수(주)</th></tr></thead><tbody>${inRows}</tbody></table>`
+    : `<div class="flat" style="font-size:11px;padding:4px 0">데이터 없음</div>`;
+  return `<div class="inv-section">
+    <div class="inv-tabs">
+      <button type="button" class="inv-tab active" onclick="event.stopPropagation();invTabSwitch('${uid}','io',this)">기관·외국인</button>
+      <button type="button" class="inv-tab" onclick="event.stopPropagation();invTabSwitch('${uid}','in',this)">개인</button>
+    </div>
+    <div id="${uid}-io">${ioTable}</div>
+    <div id="${uid}-in" style="display:none">${inTable}</div>
+  </div>`;
+}
+function invTabSwitch(uid, which, btn){
+  const io = document.getElementById(uid+'-io'), inn = document.getElementById(uid+'-in');
+  if(io)  io.style.display  = which==='io' ? '' : 'none';
+  if(inn) inn.style.display = which==='in' ? '' : 'none';
+  if(btn && btn.parentElement){
+    Array.prototype.forEach.call(btn.parentElement.children, b=>b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+}
+
 /* ══ 캔들스틱 차트 SVG ══
  * showLabels=true  → 좌측 가격축 + 하단 날짜 표시 (관심 카드용)
  * showLabels=false → 레이블 없이 바 차트만 (미니 카드용)
@@ -1203,6 +1251,7 @@ async function loadOne(s) {
       frgnRatio: j.frgnRatio??null,
       investors: j.investors??{},
       invDaily:  j.invDaily??[],
+      indivDaily: j.indivDaily??[],
       candles: j.candles||null,
       eps: j.eps??null,
       per: j.per??null,
@@ -1478,24 +1527,8 @@ function cardOf(d) {
     <div class="card-chart">${spark||'<div class="no-spark"></div>'}${chartPx}</div>
     ${pl}
   </div>`;
-  /* ── 외국인·기관 순매매 일별 테이블 ── */
-  const _daily=(d.invDaily||[]);
-  const _fmtN=v=>{if(v==null)return '<span class="flat">—</span>';const c=v>0?'c-up':v<0?'c-dn':'flat';const s=(v>0?'+':'')+v.toLocaleString('ko-KR');return `<span class="${c}">${s}</span>`;};
-  const _fmtH=v=>v!=null?v.toLocaleString('ko-KR'):'—';
-  const _fmtD=s=>{if(!s)return '';const p=s.split('.');return p.length>=3?p[1]+'.'+p[2]:s;};/* MM.DD */
-  const invRows=_daily.map(r=>`<tr>
-    <td>${_fmtD(r.date)}</td>
-    <td>${_fmtN(r.organ)}</td>
-    <td>${_fmtN(r.frgn)}</td>
-    <td class="c-hold">${_fmtH(r.frgnHold)}</td>
-    <td class="flat">${r.frgnRate!=null?r.frgnRate.toFixed(2)+'%':'—'}</td>
-  </tr>`).join('');
-  const invHtml=_daily.length?`<div class="inv-section">
-    <table class="inv-tbl">
-      <thead><tr><th>날짜</th><th>기관</th><th>외국인</th><th>보유주수</th><th>보유율</th></tr></thead>
-      <tbody>${invRows}</tbody>
-    </table>
-  </div>`:'';
+  /* ── 수급 탭 (기관·외국인 / 개인) ── */
+  const invHtml = buildInvTabHtml(d.invDaily, d.indivDaily);
   return `<div class="card">${hdr}${body}${recHtml?`<div class="rec-section">${recHtml}</div>`:''}${invHtml}</div>`;
 }
 
@@ -1587,6 +1620,7 @@ async function loadWatchOne(code){
       frgnRatio:j.frgnRatio??null,
       investors:j.investors??{},
       invDaily:j.invDaily??[],
+      indivDaily:j.indivDaily??[],
       candles:j.candles||null,
       eps:j.eps??null,
       per:j.per??null,
@@ -1709,12 +1743,7 @@ function watchCardOf(d){
   const recHtml=(()=>{const rds=RECOMMEND_DATES[d.name];if(!rds||!Object.keys(rds).length)return'';
     const chips=Object.entries(rds).map(([sh,dates])=>`<span class="rec-sheet">${sh}</span>${dates.map(r=>`<span class="rec-chip">${r}</span>`).join('')}`).join(' ');
     return`<div class="rec-dates"><span class="rec-l">추천주</span><div class="rec-chips-wrap">${chips}</div></div>`;})();
-  const _daily=d.invDaily||[];
-  const _fmtN=v=>{if(v==null)return'<span class="flat">—</span>';const c=v>0?'c-up':v<0?'c-dn':'flat';const s=(v>0?'+':'')+v.toLocaleString('ko-KR');return`<span class="${c}">${s}</span>`;};
-  const _fmtH=v=>v!=null?v.toLocaleString('ko-KR'):'—';
-  const _fmtD=s=>{if(!s)return'';const p=s.split('.');return p.length>=3?p[1]+'.'+p[2]:s;};
-  const invRows=_daily.map(r=>`<tr><td>${_fmtD(r.date)}</td><td>${_fmtN(r.organ)}</td><td>${_fmtN(r.frgn)}</td><td class="c-hold">${_fmtH(r.frgnHold)}</td><td class="flat">${r.frgnRate!=null?r.frgnRate.toFixed(2)+'%':'—'}</td></tr>`).join('');
-  const invHtml=_daily.length?`<div class="inv-section"><table class="inv-tbl"><thead><tr><th>날짜</th><th>기관</th><th>외국인</th><th>보유주수</th><th>보유율</th></tr></thead><tbody>${invRows}</tbody></table></div>`:'';
+  const invHtml = buildInvTabHtml(d.invDaily, d.indivDaily);
   return`<div class="card wcard">
     ${hdr}
     <div class="card-body"><div class="card-chart">${spark||'<div class="no-spark"></div>'}</div></div>
