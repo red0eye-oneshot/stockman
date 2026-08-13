@@ -562,6 +562,18 @@ def _fetch_investor_data_raw(code: str) -> dict:
         nk = alias.get(k, k)
         normalized[nk] = normalized.get(nk, 0) + v
 
+    # 개인 실측 데이터를 못 가져왔으면(sise_investor.naver 404 등) 기관+외국인으로 추정치 계산
+    # 원리: 개인 + 외국인 + 기관 + 기타법인 ≈ 0 (거래소 순매수 총합)
+    if not indiv_daily and inv_daily:
+        indiv_daily = [
+            {
+                'date': r['date'],
+                'indiv': -(_parse_int(r.get('organ')) + _parse_int(r.get('frgn'))),
+                'estimated': True,
+            }
+            for r in inv_daily
+        ]
+
     return {'frgnRatio': frgn_ratio, 'investors': normalized, 'invDaily': inv_daily, 'indivDaily': indiv_daily, 'name': stock_name}
 
 
@@ -1075,7 +1087,7 @@ class Handler(BaseHTTPRequestHandler):
                         '/manifest.json', '/sw.js', '/api/ping')
 
         if path not in public_paths and not self._check_auth():
-            self.send_error(401, 'Unauthorized — invalid or missing API key')
+            self.send_error(401, 'Unauthorized - invalid or missing API key')
             return
 
         if path in ('', '/index.html', '/stock_tracker.html'):

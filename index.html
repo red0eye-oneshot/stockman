@@ -1000,11 +1000,12 @@ function buildInvTabHtml(daily, indivDaily){
     <td>${_fmtInvD(r.date)}</td>
     <td>${_fmtInvN(r.indiv)}</td>
   </tr>`).join('');
+  const isEst = indivDaily.length && indivDaily[0].estimated;
   const ioTable = daily.length
     ? `<table class="inv-tbl"><thead><tr><th>날짜</th><th>기관</th><th>외국인</th><th>보유주수</th><th>보유율</th></tr></thead><tbody>${ioRows}</tbody></table>`
     : `<div class="flat" style="font-size:11px;padding:4px 0">데이터 없음</div>`;
   const inTable = indivDaily.length
-    ? `<table class="inv-tbl"><thead><tr><th>날짜</th><th>개인 순매수(주)</th></tr></thead><tbody>${inRows}</tbody></table>`
+    ? `${isEst?'<div class="flat" style="font-size:10px;padding:2px 0 4px">※ 개인 = -(기관+외국인) 추정치 (네이버 실측 데이터 미제공)</div>':''}<table class="inv-tbl"><thead><tr><th>날짜</th><th>개인 순매수(주)${isEst?' (추정)':''}</th></tr></thead><tbody>${inRows}</tbody></table>`
     : `<div class="flat" style="font-size:11px;padding:4px 0">데이터 없음</div>`;
   return `<div class="inv-section">
     <div class="inv-tabs">
