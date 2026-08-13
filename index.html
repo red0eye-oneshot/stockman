@@ -218,10 +218,7 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .rec-sheet{font-size:10px;font-weight:700;color:var(--gold);background:var(--surf2);border:1px solid var(--brd2);border-radius:4px;padding:1px 5px;white-space:nowrap;margin-right:2px}
 .rec-chip{color:#fff;background:rgba(0,199,122,.22);border:1px solid rgba(0,199,122,.6);border-radius:5px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap}
 
-/* ── 외국인·기관 순매매 테이블 ── */
-.inv-tabs{display:flex;gap:4px;margin-bottom:4px}
-.inv-tab{flex:1;font-size:11px;font-weight:700;padding:4px 0;border-radius:6px;border:1px solid var(--brd2);background:var(--surf2);color:var(--txt2);cursor:pointer;transition:all .15s}
-.inv-tab.active{background:var(--acc);color:#fff;border-color:var(--acc)}
+/* ── 외국인·기관·개인 순매매 테이블 (한 화면, 칸 간격 압축) ── */
 .inv-section{padding:4px 10px 7px;border-top:1px solid var(--brd2)}
 .inv-tbl{width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed}
 .inv-tbl th{font-size:10px;color:var(--gold);font-weight:700;padding:2px 3px;text-align:center;border-bottom:1px solid var(--brd2);white-space:nowrap}
@@ -229,6 +226,8 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .inv-tbl td:first-child{text-align:left;color:var(--txt2);font-weight:500;font-size:10px}
 .inv-tbl tr:hover td{background:var(--surf2)}
 .inv-tbl .c-hold{color:var(--txt);font-weight:500}
+.inv-tbl-compact th,.inv-tbl-compact td{padding:1px 2px;font-size:9.5px}
+.inv-tbl-compact td:first-child{font-size:9px}
 /* 매매 수급 색상: + 빨강 / - 파랑 / 0 회색 */
 .c-up{color:var(--up)}
 .c-dn{color:var(--dn)}
@@ -984,46 +983,30 @@ function apiFetch(url, opts={}) {
 function _fmtInvN(v){ if(v==null) return '<span class="flat">—</span>'; const c=v>0?'c-up':v<0?'c-dn':'flat'; const s=(v>0?'+':'')+v.toLocaleString('ko-KR'); return `<span class="${c}">${s}</span>`; }
 function _fmtInvH(v){ return v!=null ? v.toLocaleString('ko-KR') : '—'; }
 function _fmtInvD(s){ if(!s) return ''; const p=s.split('.'); return p.length>=3 ? p[1]+'.'+p[2] : s; }
-let _invTabSeq = 0;
 function buildInvTabHtml(daily, indivDaily){
   daily = daily||[]; indivDaily = indivDaily||[];
-  if(!daily.length && !indivDaily.length) return '';
-  const uid = 'it' + (_invTabSeq++);
-  const ioRows = daily.map(r=>`<tr>
+  if(!daily.length) return '';
+  const indivByDate = {};
+  indivDaily.forEach(r=>{ indivByDate[r.date] = r; });
+  const isEst = indivDaily.length && indivDaily[0].estimated;
+  const rows = daily.map(r=>{
+    const ir = indivByDate[r.date];
+    return `<tr>
     <td>${_fmtInvD(r.date)}</td>
     <td>${_fmtInvN(r.organ)}</td>
     <td>${_fmtInvN(r.frgn)}</td>
+    <td>${ir ? _fmtInvN(ir.indiv) : '<span class="flat">—</span>'}</td>
     <td class="c-hold">${_fmtInvH(r.frgnHold)}</td>
     <td class="flat">${r.frgnRate!=null ? r.frgnRate.toFixed(2)+'%' : '—'}</td>
-  </tr>`).join('');
-  const inRows = indivDaily.map(r=>`<tr>
-    <td>${_fmtInvD(r.date)}</td>
-    <td>${_fmtInvN(r.indiv)}</td>
-  </tr>`).join('');
-  const isEst = indivDaily.length && indivDaily[0].estimated;
-  const ioTable = daily.length
-    ? `<table class="inv-tbl"><thead><tr><th>날짜</th><th>기관</th><th>외국인</th><th>보유주수</th><th>보유율</th></tr></thead><tbody>${ioRows}</tbody></table>`
-    : `<div class="flat" style="font-size:11px;padding:4px 0">데이터 없음</div>`;
-  const inTable = indivDaily.length
-    ? `${isEst?'<div class="flat" style="font-size:10px;padding:2px 0 4px">※ 개인 = -(기관+외국인) 추정치 (네이버 실측 데이터 미제공)</div>':''}<table class="inv-tbl"><thead><tr><th>날짜</th><th>개인 순매수(주)${isEst?' (추정)':''}</th></tr></thead><tbody>${inRows}</tbody></table>`
-    : `<div class="flat" style="font-size:11px;padding:4px 0">데이터 없음</div>`;
+  </tr>`;
+  }).join('');
   return `<div class="inv-section">
-    <div class="inv-tabs">
-      <button type="button" class="inv-tab active" onclick="event.stopPropagation();invTabSwitch('${uid}','io',this)">기관·외국인</button>
-      <button type="button" class="inv-tab" onclick="event.stopPropagation();invTabSwitch('${uid}','in',this)">개인</button>
-    </div>
-    <div id="${uid}-io">${ioTable}</div>
-    <div id="${uid}-in" style="display:none">${inTable}</div>
+    ${isEst?'<div class="flat" style="font-size:9px;padding:0 0 3px">※ 개인 = -(기관+외국인) 추정치</div>':''}
+    <table class="inv-tbl inv-tbl-compact">
+      <thead><tr><th>날짜</th><th>기관</th><th>외국인</th><th>개인${isEst?'*':''}</th><th>보유주수</th><th>보유율</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
   </div>`;
-}
-function invTabSwitch(uid, which, btn){
-  const io = document.getElementById(uid+'-io'), inn = document.getElementById(uid+'-in');
-  if(io)  io.style.display  = which==='io' ? '' : 'none';
-  if(inn) inn.style.display = which==='in' ? '' : 'none';
-  if(btn && btn.parentElement){
-    Array.prototype.forEach.call(btn.parentElement.children, b=>b.classList.remove('active'));
-    btn.classList.add('active');
-  }
 }
 
 /* ══ 캔들스틱 차트 SVG ══
