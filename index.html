@@ -482,12 +482,17 @@ body.is-mobile #list { padding: 4px 4px 80px; }
 /* ── APK/standalone 감지 → is-mobile 클래스 설정 ──
    TWA·설치형 PWA·Capacitor APK = standalone 모드 → 엑셀 버튼 숨김 */
 (function(){
-  const isStandalone = window.matchMedia('(display-mode: standalone)').matches
-                    || !!window.Capacitor
-                    || location.protocol === 'capacitor:';
-  // 설치된 앱/PWA가 아니어도 화면 폭이 좁으면(일반 모바일 브라우저 탭) 모바일 레이아웃 적용
-  const isNarrow = Math.min(window.innerWidth, window.screen?.width || window.innerWidth) < 480;
-  if(isStandalone || isNarrow) document.body.classList.add('is-mobile');
+  function applyMobileClass(){
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+                      || !!window.Capacitor
+                      || location.protocol === 'capacitor:';
+    // 설치된 앱/PWA가 아니어도 화면 폭이 좁으면(일반 모바일 브라우저 탭) 모바일 레이아웃 적용
+    const isNarrow = Math.min(window.innerWidth, window.screen?.width || window.innerWidth) < 480;
+    if(isStandalone || isNarrow) document.body.classList.add('is-mobile');
+  }
+  // 이 스크립트는 <head> 안에서 실행되므로 이 시점엔 document.body가 아직 없음(null) — DOM 준비 후 실행
+  if(document.body) applyMobileClass();
+  else document.addEventListener('DOMContentLoaded', applyMobileClass);
 })();
 
 /* 서비스 워커: 로컬 서버는 SW 전체 해제, 원격(APK)만 등록 */
