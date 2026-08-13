@@ -785,7 +785,25 @@ async function loadRecommendDates() {
     const r = await apiFetch(`${SRV}/api/recommend_dates`);
     if (r.ok) {
       const srv = await r.json();
-      if (Object.keys(srv).length > 0) RECOMMEND_DATES = srv; // 서버 데이터 우선
+      if (Object.keys(srv).length > 0) {
+        RECOMMEND_DATES = srv; // 서버(엑셀) 데이터 우선
+
+        // PC(로컬 5555)가 방금 파싱한 최신 데이터를 클라우드에도 자동 push.
+        // 클라우드엔 엑셀 파일이 없으므로, 폰이 앱을 열 때 최신 추천주 날짜를 받으려면
+        // PC가 대신 파싱해서 클라우드로 올려줘야 함 (포트폴리오 동기화와 동일한 방식).
+        if (SRV === '') {
+          try {
+            const ctrl = new AbortController(); const tid = setTimeout(()=>ctrl.abort(), 15000);
+            await apiFetch(`${CLOUD_SRV}/api/recommend_dates`, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(srv),
+              signal: ctrl.signal
+            });
+            clearTimeout(tid);
+          } catch(e) { /* 클라우드 미연결 → 무시 */ }
+        }
+      }
     }
   } catch(e) { /* 서버 미지원·openpyxl 없음 → 하드코딩 폴백 유지 */ }
 }

@@ -60,6 +60,12 @@ except Exception:
     sys.stderr = _saved_stderr
     PYKRX = False
 
+try:
+    import openpyxl
+    OPENPYXL = True
+except Exception:
+    OPENPYXL = False
+
 # ── 설정 ────────────────────────────────────────────────
 PORT          = int(os.environ.get('PORT', 5555))   # Render는 환경변수로 PORT 지정
 CACHE_TTL     = 60    # 장중 캐시 유효시간(초) — 빠른 실시간 갱신
@@ -1068,6 +1074,111 @@ def save_portfolio(data: dict):
         _log(f'portfolio save error: {e}')
 
 
+# ── 추천주 날짜 (My_Stock_Bundle_Status.xlsx 파싱) ─────────────
+# 로컬 PC: 서버 폴더에 놓인 엑셀을 직접 파싱해 서빙.
+# 클라우드(엑셀 없음): PC가 파싱해서 push한 recommend_dates.json 을 그대로 서빙.
+EXCEL_PATH          = os.path.join(SCRIPT_DIR, 'My_Stock_Bundle_Status.xlsx')
+RECOMMEND_JSON_PATH = os.path.join(SCRIPT_DIR, 'recommend_dates.json')
+_recommend_lock  = threading.Lock()
+_recommend_cache = {'data': None, 'mtime': None}
+
+_REC_SKIP_HEADER_KW = ('종목', '수익률', '횟수')                     # 날짜 열이 아닌 헤더(집계표 등)
+_REC_SKIP_NAME_KW   = ('특별판', '반등', '매도', '라이브', '참고', '주의')  # 종목명이 아닌 안내 문구
+
+def _rec_clean_name(raw):
+    """셀 값 → 종목명 정제. '004170 신세계' → '신세계'. 종목명이 아니면 None."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or len(s) > 14:
+        return None
+    for kw in _REC_SKIP_NAME_KW:
+        if kw in s:
+            return None
+    parts = s.split(' ', 1)
+    if len(parts) == 2 and re.fullmatch(r'\d{4,6}', parts[0]):
+        s = parts[1].strip()
+    return s or None
+
+def _rec_parse_date(header):
+    """'2월 6일' → '2/6'. 날짜 형식이 아니면 None."""
+    m = re.match(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', str(header or ''))
+    if not m:
+        return None
+    return f"{int(m.group(1))}/{int(m.group(2))}"
+
+def parse_recommend_excel() -> dict:
+    """My_Stock_Bundle_Status.xlsx (시트별 = 월그룹) → {종목명: {월그룹: [날짜,...]}}"""
+    if not OPENPYXL or not os.path.exists(EXCEL_PATH):
+        return {}
+    result = {}
+    try:
+        wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True, read_only=True)
+        for ws in wb.worksheets:
+            month_group = (ws.title or '').strip()
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                continue
+            header = rows[0]
+            for col_idx, h in enumerate(header):
+                if h is None:
+                    continue
+                hs = str(h)
+                if any(kw in hs for kw in _REC_SKIP_HEADER_KW):
+                    continue
+                date_str = _rec_parse_date(hs)
+                if not date_str:
+                    continue
+                for r in rows[1:]:
+                    if col_idx >= len(r):
+                        continue
+                    name = _rec_clean_name(r[col_idx])
+                    if not name:
+                        continue
+                    grp = result.setdefault(name, {}).setdefault(month_group, [])
+                    if date_str not in grp:
+                        grp.append(date_str)
+        for name in result:
+            for grp in result[name]:
+                result[name][grp].sort(key=lambda d: tuple(map(int, d.split('/'))))
+        _log(f'[추천주] 엑셀 파싱 완료: {len(result)}개 종목')
+    except Exception as e:
+        _log(f'[추천주] 엑셀 파싱 오류: {type(e).__name__}: {e}')
+        return {}
+    return result
+
+def load_recommend_json() -> dict:
+    try:
+        with open(RECOMMEND_JSON_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_recommend_json(data: dict):
+    try:
+        with open(RECOMMEND_JSON_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        _log(f'[추천주] recommend_dates.json 저장: {len(data)}개 종목')
+    except Exception as e:
+        _log(f'[추천주] 저장 오류: {e}')
+
+def get_recommend_dates() -> dict:
+    """로컬(엑셀 있음): mtime 기준 캐시 파싱. 클라우드(엑셀 없음): push받은 JSON 서빙."""
+    if OPENPYXL and os.path.exists(EXCEL_PATH):
+        try:
+            mtime = os.path.getmtime(EXCEL_PATH)
+        except OSError:
+            mtime = None
+        with _recommend_lock:
+            if _recommend_cache['mtime'] != mtime or _recommend_cache['data'] is None:
+                data = parse_recommend_excel()
+                if data:
+                    _recommend_cache['data']  = data
+                    _recommend_cache['mtime'] = mtime
+            return _recommend_cache['data'] or {}
+    return load_recommend_json()
+
+
 class Handler(BaseHTTPRequestHandler):
 
     def _check_auth(self) -> bool:
@@ -1129,7 +1240,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_json([])
 
         elif path == '/api/recommend_dates':
-            self._serve_json([])
+            self._serve_json(get_recommend_dates())
 
         elif path == '/api/reload':
             clear_cache()
@@ -1209,6 +1320,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_json({'ok': True, 'saved': True})
             except Exception as e:
                 _log(f'portfolio POST error: {e}')
+                self.send_error(400, f'Bad request: {e}')
+
+        elif path == '/api/recommend_dates':
+            # 로컬 PC가 엑셀을 파싱한 결과를 클라우드에 push할 때 사용 (클라우드엔 엑셀이 없음)
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body   = self.rfile.read(length)
+                data   = json.loads(body.decode('utf-8'))
+                if not isinstance(data, dict):
+                    self.send_error(400, 'Bad request: expected object')
+                    return
+                save_recommend_json(data)
+                self._serve_json({'ok': True, 'saved': True, 'count': len(data)})
+            except Exception as e:
+                _log(f'recommend_dates POST error: {e}')
                 self.send_error(400, f'Bad request: {e}')
         else:
             self.send_error(404)
