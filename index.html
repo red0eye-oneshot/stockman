@@ -2561,6 +2561,18 @@ function deleteMemo(){
   scheduleSync();
 }
 
+/* ══ 자동 새로고침 (5분마다) ══
+   아이콘을 직접 눌러 갱신하지 않아도 백그라운드에서 주기적으로 주가를 갱신.
+   화면이 꺼져있거나 다른 탭/앱으로 전환된 동안은 건너뛰어 배터리·데이터 절약. */
+let _autoRefreshTimer = null;
+function startAutoRefresh(){
+  if(_autoRefreshTimer) clearInterval(_autoRefreshTimer);
+  _autoRefreshTimer = setInterval(() => {
+    if(document.hidden) return;
+    if(!busy) start();
+  }, 5 * 60 * 1000);
+}
+
 /* ══ 부팅 IIFE ══ */
 (async () => {
   const barEl = document.getElementById('splashBar');
@@ -2584,6 +2596,7 @@ function deleteMemo(){
       pushPortfolio();
     });
     start();
+    startAutoRefresh();
     return;
   }
 
@@ -2606,6 +2619,7 @@ function deleteMemo(){
     STOCKS=loadStocks(); BP=loadBP(); QTY=loadQty(); DT=loadDt(); MEMO=loadMemo();
     pushPortfolio();
     start();
+    startAutoRefresh();
   }
 })();
 </script>
