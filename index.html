@@ -177,6 +177,10 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 #brkrTags{display:none;flex-wrap:wrap;gap:5px;margin:6px 0 2px}
 .brkr-tag-pill{font-size:13px;font-weight:700;color:var(--acc);background:rgba(91,79,255,.12);border:1px solid rgba(91,79,255,.35);border-radius:20px;padding:3px 10px;cursor:pointer;white-space:nowrap}
 .brkr-tag-pill:active{background:rgba(91,79,255,.3)}
+/* 상단 증권사 바로가기 버튼 */
+.brkr-quickbar{display:flex;flex-wrap:wrap;gap:8px;padding:2px 12px 10px}
+.brkr-qbtn{flex:1;min-width:88px;text-align:center;background:var(--acc);color:#fff;font-weight:800;font-size:14px;padding:9px 8px;border-radius:10px;border:none;cursor:pointer;letter-spacing:-.2px}
+.brkr-qbtn:active{opacity:.75}
 /* 증권사 텍스트 입력 (종목리스트) */
 .mi-brkr{background:var(--bg);border:1px solid var(--brd2);color:var(--txt);font-size:13px;padding:3px 6px;border-radius:6px;outline:none;width:78px;cursor:text}
 .mi-brkr:focus{border-color:var(--acc)}
@@ -568,6 +572,9 @@ if ('serviceWorker' in navigator) {
   <button class="tab" id="tabTdn" onclick="setF('tdn',this)">오늘하락</button>
 </div>
 
+<!-- 증권사 바로가기 -->
+<div class="brkr-quickbar" id="brkrQuickbar"></div>
+
 <!-- 정렬 -->
 <div class="sortbar">
   <button class="tab-star" id="tabWatch" onclick="setF('watch',this)">★ 관심</button>
@@ -629,6 +636,10 @@ if ('serviceWorker' in navigator) {
         </div>
         <div class="arow" style="margin-top:0"><input class="inp" id="iBrkr" list="brkrList" placeholder="증권사 선택 또는 새 이름 입력" autocomplete="off" style="flex:1"><datalist id="brkrList"></datalist></div>
         <div id="brkrTags"></div>
+        <div class="arow" style="margin-top:6px">
+          <input class="inp" id="iNewBrkr" placeholder="+ 새 증권사 이름 등록 (예: 신한)" maxlength="12" autocomplete="off" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addCustomBroker();}">
+          <button class="btnadd" style="width:auto;padding:6px 14px;background:var(--surf2);border:1px solid var(--brd2);color:var(--txt)" onclick="addCustomBroker()">등록</button>
+        </div>
         <button class="btnadd" onclick="addStock()">추가하기</button>
         <div class="amsg" id="amsg"></div>
       </div>
@@ -1787,6 +1798,7 @@ function render() {
   const ae=document.activeElement;
   if(ae?.classList.contains('bi')||ae?.classList.contains('bi-date')||ae?.classList.contains('memo-price-inp'))return;
   BP=loadBP(); MEMO=loadMemo();
+  renderBrkrQuickbar();
   if(!Object.keys(D).length){
     document.getElementById('list').innerHTML='<div class="brkr-section"><div class="brkr-cards">'+STOCKS.slice(0,6).map(skCard).join('')+'</div></div>'; return;
   }
@@ -1878,10 +1890,72 @@ function closeModal(){
 function bgTap(e){if(e.target===document.getElementById('modal'))closeModal();}
 
 const PRESET_BRKRS=['키움','미래에셋','한국투자','삼성','신한','KB','대신','NH','하나','토스','카카오'];
-function getAllBrkrs(){const used=[...new Set(STOCKS.map(s=>s.brkr).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ko'));return[...used,...PRESET_BRKRS.filter(b=>!used.includes(b))];}
+
+// 사용자가 직접 등록한 증권사(아직 어떤 종목에도 안 쓰였어도 목록/상단버튼에 바로 표시됨)
+const KCB='srk_custom_brkrs_v1';
+const loadCustomBrkrs=()=>{try{return JSON.parse(localStorage.getItem(KCB)||'[]');}catch{return[];}};
+const saveCustomBrkrs=arr=>localStorage.setItem(KCB,JSON.stringify(arr));
+
+function addCustomBroker(){
+  const el=document.getElementById('iNewBrkr');
+  const msgEl=document.getElementById('amsg');
+  const v=(el.value||'').trim();
+  if(!v){ if(msgEl){msgEl.textContent='등록할 증권사 이름을 입력하세요.'; msgEl.style.display='block';} return; }
+  const list=loadCustomBrkrs();
+  if(getAllBrkrs().some(b=>b.toLowerCase()===v.toLowerCase())){
+    if(msgEl){msgEl.textContent=`"${v}"은(는) 이미 등록되어 있습니다.`; msgEl.style.display='block';}
+    el.value='';
+    return;
+  }
+  list.push(v);
+  saveCustomBrkrs(list);
+  el.value='';
+  if(msgEl){msgEl.textContent=`"${v}" 증권사가 등록되었습니다.`; msgEl.style.color='var(--up)'; msgEl.style.display='block';}
+  // 방금 등록한 이름을 종목 추가 폼의 증권사 칸에도 바로 채워줌
+  const brkrEl=document.getElementById('iBrkr'); if(brkrEl) brkrEl.value=v;
+  populateBrkrList(); renderBrkrTags(); renderBrkrQuickbar();
+}
+
+// STOCKS에서 실제 쓰이는 증권사 + 사용자가 등록만 해둔 증권사(아직 종목 없음) — 태그/상단버튼 공용
+function activeBrkrs(){
+  const used=STOCKS.map(s=>s.brkr).filter(Boolean);
+  const custom=loadCustomBrkrs();
+  return [...new Set([...used,...custom])].sort((a,b)=>a.localeCompare(b,'ko'));
+}
+function getAllBrkrs(){const active=activeBrkrs();return[...active,...PRESET_BRKRS.filter(b=>!active.includes(b))];}
 function populateBrkrList(){const dl=document.getElementById('brkrList');if(!dl)return;dl.innerHTML=getAllBrkrs().map(b=>`<option value="${b}">`).join('');}
+
+/* ══ 상단 증권사 바로가기 버튼 ══
+   종목 관리에서 사용 중인 증권사를 자동으로 모아 버튼으로 표시.
+   새 증권사를 추가(종목의 증권사란에 새 이름 입력)하면 다음 render() 때 자동으로 버튼도 생김. */
+const BROKER_URLS = {
+  '키움':     'https://www.kiwoom.com',
+  '미래에셋': 'https://securities.miraeasset.com',
+  '한국투자': 'https://securities.koreainvestment.com',
+  '삼성':     'https://www.samsungpop.com',
+  '신한':     'https://shinhansec.com',
+  'KB':       'https://www.kbsec.com',
+  '대신':     'https://www.daishin.com',
+  'NH':       'https://www.nhsec.com',
+  '하나':     'https://www.hanaw.com',
+  '토스':     'https://www.tossinvest.com',
+  '카카오':   'https://kakaopaysec.com',
+};
+function brokerUrl(name){
+  if(BROKER_URLS[name]) return BROKER_URLS[name];
+  // 목록에 없는 증권사(새로 추가한 이름)는 홈페이지 검색 결과로 이동
+  return `https://search.naver.com/search.naver?query=${encodeURIComponent(name+' 증권 홈페이지')}`;
+}
+function renderBrkrQuickbar(){
+  const wrap=document.getElementById('brkrQuickbar');
+  if(!wrap) return;
+  const used=activeBrkrs();
+  wrap.innerHTML = used.map(b=>
+    `<button class="brkr-qbtn" onclick="window.open('${brokerUrl(b)}','_blank')">🏦 ${b}</button>`
+  ).join('');
+}
 function renderBrkrTags(){
-  const used=[...new Set(STOCKS.map(s=>s.brkr).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ko'));
+  const used=activeBrkrs();
   const wrap=document.getElementById('brkrTags'); if(!wrap)return;
   if(!used.length){wrap.style.display='none';return;}
   wrap.style.display='flex';
