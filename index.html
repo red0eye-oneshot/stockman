@@ -638,12 +638,12 @@ if ('serviceWorker' in navigator) {
           <input class="inp" id="iName" placeholder="종목명 (코드 없이도 자동검색)" maxlength="20">
           <input class="inp inps" id="iCode" placeholder="종목코드(선택)" maxlength="8">
         </div>
-        <div class="arow" style="margin-top:0"><input class="inp" id="iBrkr" list="brkrList" placeholder="증권사 선택 또는 새 이름 입력" autocomplete="off" style="flex:1"><datalist id="brkrList"></datalist></div>
-        <div id="brkrTags"></div>
-        <div class="arow" style="margin-top:6px">
-          <input class="inp" id="iNewBrkr" placeholder="+ 새 증권사 이름 등록 (예: 신한)" maxlength="12" autocomplete="off" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addCustomBroker();}">
-          <button class="btnadd" style="width:auto;padding:6px 14px;background:var(--surf2);border:1px solid var(--brd2);color:var(--txt)" onclick="addCustomBroker()">등록</button>
+        <div class="arow" style="margin-top:0">
+          <input class="inp" id="iBrkr" list="brkrList" placeholder="증권사 선택 또는 새 이름 입력" autocomplete="off" style="flex:1"><datalist id="brkrList"></datalist>
+          <button class="btnadd" style="width:auto;padding:6px 12px;background:var(--surf2);border:1px solid var(--brd2);color:var(--txt);flex-shrink:0" onclick="addCustomBroker()" title="종목 없이 증권사만 등록">＋등록</button>
         </div>
+        <div style="font-size:11px;color:var(--txt3);margin:2px 0 4px">새 증권사 이름을 입력한 뒤 "＋등록"을 누르면 종목 없이도 상단 메뉴에 바로 추가됩니다.</div>
+        <div id="brkrTags"></div>
         <button class="btnadd" onclick="addStock()">추가하기</button>
         <div class="amsg" id="amsg"></div>
       </div>
@@ -1438,7 +1438,7 @@ function skCard(){
 /* == 카드 HTML: 이미지 참고 레이아웃 == */
 function cardOf(d) {
   if(!d.ok) return `<div class="card err">
-    <div class="card-hdr"><span class="c-name"><a href="https://finance.naver.com/item/main.naver?code=${d.realCode||d.code}" target="_blank" rel="noopener">${d.name}</a></span>${isETF(d.code)?'<span class="c-badge">ETF</span>':''}<span class="c-code">${d.code}</span></div>
+    <div class="card-hdr"><span class="c-name"><a href="https://finance.naver.com/item/main.naver?code=${d.realCode||d.code}" target="_blank" rel="noopener">${d.name}</a></span>${isETF(d.realCode||d.code)?'<span class="c-badge">ETF</span>':''}<span class="c-code">${d.code}</span></div>
     <div class="err-msg">⚠ 조회실패${d.src?' ('+d.src+')':''}</div>
   </div>`;
   const bp=BP[d.code], qty=QTY[d.code], dt=DT[d.code]||(d.defDt||'');
@@ -1477,7 +1477,7 @@ function cardOf(d) {
   const hasMemo=!!(memo.target||memo.stop||memo.note);
   const hdr=`<div class="card-hdr">
     <span class="c-name"><a href="https://finance.naver.com/item/main.naver?code=${d.realCode||d.code}" target="_blank" rel="noopener">${d.name}</a></span>
-    ${isETF(d.code)?'<span class="c-badge">ETF</span>':''}
+    ${isETF(d.realCode||d.code)?'<span class="c-badge">ETF</span>':''}
     ${qty?`<span class="c-hold">${fmt(qty)}주${totI?' '+fmtMan(totI):''}</span>`:''}
     <span class="c-code">${d.realCode||d.code}${d.frgnRatio!=null?` · ${d.frgnRatio.toFixed(1)}%`:''}</span>
     <button class="memo-card-btn${hasMemo?' has-memo':''}" onclick="event.stopPropagation();openMemo('${d.code}')" title="메모">📝</button>
@@ -1809,8 +1809,8 @@ function render() {
   let list=STOCKS.map(s=>D[s.code]||{...s,ok:false,_p:true});
   if(flt==='up')  list=list.filter(d=>{const b=BP[d.code];return b&&d.px?d.px>b:d.r1>0;});
   else if(flt==='dn')  list=list.filter(d=>{const b=BP[d.code];return b&&d.px?d.px<b:d.r1<0;});
-  else if(flt==='etf') list=list.filter(d=>isETF(d.code));
-  else if(flt==='stk') list=list.filter(d=>!isETF(d.code));
+  else if(flt==='etf') list=list.filter(d=>isETF(d.realCode||d.code));
+  else if(flt==='stk') list=list.filter(d=>!isETF(d.realCode||d.code));
   else if(flt==='buy') list=list.filter(d=>!!BP[d.code]);
   else if(flt==='tup') list=list.filter(d=>{
     const cans=d.candles||[];const isRT=d.src==='네이버 실시간';
@@ -1901,22 +1901,19 @@ const loadCustomBrkrs=()=>{try{return JSON.parse(localStorage.getItem(KCB)||'[]'
 const saveCustomBrkrs=arr=>localStorage.setItem(KCB,JSON.stringify(arr));
 
 function addCustomBroker(){
-  const el=document.getElementById('iNewBrkr');
+  const el=document.getElementById('iBrkr');
   const msgEl=document.getElementById('amsg');
   const v=(el.value||'').trim();
-  if(!v){ if(msgEl){msgEl.textContent='등록할 증권사 이름을 입력하세요.'; msgEl.style.display='block';} return; }
-  const list=loadCustomBrkrs();
-  if(getAllBrkrs().some(b=>b.toLowerCase()===v.toLowerCase())){
-    if(msgEl){msgEl.textContent=`"${v}"은(는) 이미 등록되어 있습니다.`; msgEl.style.display='block';}
-    el.value='';
+  if(!v){ if(msgEl){msgEl.style.color=''; msgEl.textContent='등록할 증권사 이름을 입력하세요.'; msgEl.style.display='block';} return; }
+  // 이미 "쓰이고 있는" 증권사인지만 확인 (PRESET_BRKRS는 그냥 추천 목록일 뿐, 실제 등록 여부와는 무관)
+  if(activeBrkrs().some(b=>b.toLowerCase()===v.toLowerCase())){
+    if(msgEl){msgEl.style.color=''; msgEl.textContent=`"${v}"은(는) 이미 등록되어 있습니다.`; msgEl.style.display='block';}
     return;
   }
+  const list=loadCustomBrkrs();
   list.push(v);
   saveCustomBrkrs(list);
-  el.value='';
-  if(msgEl){msgEl.textContent=`"${v}" 증권사가 등록되었습니다.`; msgEl.style.color='var(--up)'; msgEl.style.display='block';}
-  // 방금 등록한 이름을 종목 추가 폼의 증권사 칸에도 바로 채워줌
-  const brkrEl=document.getElementById('iBrkr'); if(brkrEl) brkrEl.value=v;
+  if(msgEl){msgEl.textContent=`"${v}" 증권사가 상단 메뉴에 등록되었습니다.`; msgEl.style.color='var(--up)'; msgEl.style.display='block';}
   populateBrkrList(); renderBrkrTags(); renderBrkrQuickbar();
 }
 
@@ -1988,7 +1985,7 @@ function renderMList(){
       const s=STOCKS[i];
       return `<div class="mi">
         <div style="flex:1">
-          <div class="miname">${s.name}${isETF(s.code)?'<span class="c-badge" style="margin-left:4px">ETF</span>':''}</div>
+          <div class="miname">${s.name}${isETF(s.realCode||s.code)?'<span class="c-badge" style="margin-left:4px">ETF</span>':''}</div>
           <div class="micode" id="mc-${i}">${s.realCode||s.code}${s.brkr?' · <b style="color:var(--acc)">'+ s.brkr+'</b>':''}</div>
         </div>
         <input class="mi-brkr" list="brkrList" value="${s.brkr||''}" placeholder="미분류" onchange="onBrkr(${i},this.value)">
@@ -2021,6 +2018,7 @@ async function addStock(){
   let name = nameEl.value.trim();
   let rawCode = codeEl.value.trim().toUpperCase();
   const brkr = brkrEl.value.trim();
+  msgEl.style.color='';
 
   if(!name && !rawCode){ msgEl.textContent='종목명 또는 종목코드를 입력하세요.'; msgEl.style.display='block'; return; }
 
@@ -2051,8 +2049,22 @@ async function addStock(){
 
   if(!name){ msgEl.textContent='종목명을 입력하세요.'; msgEl.style.display='block'; return; }
   if(!rawCode || !/^[A-Z0-9]{4,8}$/.test(rawCode)){ msgEl.textContent='코드는 4~8자리 영문/숫자입니다.'; msgEl.style.display='block'; return; }
-  if(STOCKS.find(s=>s.code===rawCode)){ msgEl.textContent='이미 추가된 종목코드입니다.'; msgEl.style.display='block'; return; }
-  STOCKS.push({name, code: rawCode, brkr});
+
+  // 같은 종목을 여러 증권사 계좌에 나눠 보유한 경우 지원: 이미 있는 종목이라도
+  // 증권사가 다르면 별도 보유(매수단가·수량 독립)로 추가하고, 같은 증권사면 중복으로 막음.
+  const sameStock = STOCKS.filter(s => (s.realCode||s.code) === rawCode);
+  const sameBrokerDup = sameStock.find(s => (s.brkr||'').trim() === (brkr||'').trim());
+  if(sameBrokerDup){ msgEl.textContent='이미 추가된 종목코드입니다.'; msgEl.style.display='block'; return; }
+
+  const newEntry = {name, code: rawCode, brkr};
+  if(sameStock.length){
+    // 코드 뒤에 A,B,C...를 붙여 STOCKS 내에서 유일한 키로 만들고, 실제 시세 조회는 realCode로 함
+    let ch = 65;
+    while(STOCKS.some(s=>s.code === rawCode+String.fromCharCode(ch))) ch++;
+    newEntry.code = rawCode + String.fromCharCode(ch);
+    newEntry.realCode = rawCode;
+  }
+  STOCKS.push(newEntry);
   saveStocks(STOCKS);
   // 예전에 삭제했던 기본 종목을 다시 추가한 경우 삭제 목록에서도 제외
   const del=loadDeleted();
