@@ -156,6 +156,10 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .micode{font-size:12px;color:var(--txt2)}
 .mibadge{font-size:11px;color:var(--grn);margin-left:auto}
 .btndel{background:rgba(255,51,85,.12);border:none;color:var(--up);width:28px;height:28px;border-radius:7px;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.mi-grp{margin-top:10px}
+.mi-grp:first-child{margin-top:0}
+.mi-grp-hdr{font-size:13px;font-weight:800;color:var(--acc);padding:4px 0;border-bottom:1px solid rgba(91,79,255,.3);margin-bottom:2px;display:flex;align-items:center;gap:6px}
+.mi-grp-cnt{font-size:11px;color:var(--txt2);font-weight:600}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 .spin{display:inline-block;width:11px;height:11px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
@@ -1875,7 +1879,7 @@ function render() {
   keys.forEach(brkr=>{
     const grp=grpMap[brkr];
     const st=calcBrkrStats(grp);
-    html+=`<div class="brkr-section">${brkrHdr(brkr,st)}<div class="brkr-cards">${grp.map(d=>d._p?skCard():cardOf(d)).join('')}</div></div>`;
+    html+=`<div class="brkr-section" data-brkr="${escAttr(brkr)}">${brkrHdr(brkr,st)}<div class="brkr-cards">${grp.map(d=>d._p?skCard():cardOf(d)).join('')}</div></div>`;
   });
   document.getElementById('list').innerHTML=html;
 }
@@ -1925,33 +1929,33 @@ function activeBrkrs(){
 function getAllBrkrs(){const active=activeBrkrs();return[...active,...PRESET_BRKRS.filter(b=>!active.includes(b))];}
 function populateBrkrList(){const dl=document.getElementById('brkrList');if(!dl)return;dl.innerHTML=getAllBrkrs().map(b=>`<option value="${b}">`).join('');}
 
+/* ══ 문자열 escape 헬퍼 (증권사명 등 사용자 입력을 속성/문자열에 안전하게 삽입) ══ */
+function escAttr(s){ return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;'); }
+function escJs(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
 /* ══ 상단 증권사 바로가기 버튼 ══
-   종목 관리에서 사용 중인 증권사를 자동으로 모아 버튼으로 표시.
-   새 증권사를 추가(종목의 증권사란에 새 이름 입력)하면 다음 render() 때 자동으로 버튼도 생김. */
-const BROKER_URLS = {
-  '키움':     'https://www.kiwoom.com',
-  '미래에셋': 'https://securities.miraeasset.com',
-  '한국투자': 'https://securities.koreainvestment.com',
-  '삼성':     'https://www.samsungpop.com',
-  '신한':     'https://shinhansec.com',
-  'KB':       'https://www.kbsec.com',
-  '대신':     'https://www.daishin.com',
-  'NH':       'https://www.nhsec.com',
-  '하나':     'https://www.hanaw.com',
-  '토스':     'https://www.tossinvest.com',
-  '카카오':   'https://kakaopaysec.com',
-};
-function brokerUrl(name){
-  if(BROKER_URLS[name]) return BROKER_URLS[name];
-  // 목록에 없는 증권사(새로 추가한 이름)는 홈페이지 검색 결과로 이동
-  return `https://search.naver.com/search.naver?query=${encodeURIComponent(name+' 증권 홈페이지')}`;
+   종목 관리에서 사용 중인(또는 새로 등록만 한) 증권사를 자동으로 모아 버튼으로 표시.
+   클릭하면 외부 사이트가 아니라 앱 안의 해당 증권사 종목 섹션으로 스크롤 이동. */
+function jumpToBrkr(name){
+  // 다른 필터/관심탭이 켜져 있으면 해당 증권사 종목이 화면에서 걸러져 안 보일 수 있으므로 '전체'로 전환
+  if(flt!=='all'){
+    const allBtn=[...document.querySelectorAll('.tabs .tab')].find(b=>b.getAttribute('onclick')==="setF('all',this)");
+    if(allBtn) setF('all', allBtn);
+  }
+  const sec=[...document.querySelectorAll('.brkr-section')].find(el=>el.dataset.brkr===name);
+  if(sec){
+    sec.scrollIntoView({behavior:'smooth', block:'start'});
+  } else {
+    // 아직 종목이 없는(등록만 된) 증권사면 이동할 섹션이 없음 → 종목 관리에서 종목을 추가하도록 안내
+    alert(`"${name}"에 등록된 종목이 아직 없습니다.\n설정(⚙)에서 종목을 추가하면 여기로 이동할 수 있어요.`);
+  }
 }
 function renderBrkrQuickbar(){
   const wrap=document.getElementById('brkrQuickbar');
   if(!wrap) return;
   const used=activeBrkrs();
   wrap.innerHTML = used.map(b=>
-    `<button class="brkr-qbtn" onclick="window.open('${brokerUrl(b)}','_blank')">🏦 ${b}</button>`
+    `<button class="brkr-qbtn" onclick="jumpToBrkr('${escJs(b)}')">🏦 ${b}</button>`
   ).join('');
 }
 function renderBrkrTags(){
@@ -1959,12 +1963,30 @@ function renderBrkrTags(){
   const wrap=document.getElementById('brkrTags'); if(!wrap)return;
   if(!used.length){wrap.style.display='none';return;}
   wrap.style.display='flex';
-  wrap.innerHTML=used.map(b=>`<span class="brkr-tag-pill" onclick="document.getElementById('iBrkr').value='${b}'">🏦 ${b}</span>`).join('');
+  wrap.innerHTML=used.map(b=>`<span class="brkr-tag-pill" onclick="document.getElementById('iBrkr').value='${escJs(b)}'">🏦 ${b}</span>`).join('');
 }
 function renderMList(){
   populateBrkrList(); renderBrkrTags();
-  document.getElementById('mlist').innerHTML=STOCKS.length
-    ?STOCKS.map((s,i)=>`<div class="mi">
+  const wrap=document.getElementById('mlist');
+  if(!STOCKS.length){
+    wrap.innerHTML='<div style="color:var(--txt2);font-size:13px;padding:10px 0">종목이 없습니다.</div>';
+    return;
+  }
+  // 증권사별로 묶어서 표시. delStock/onBrkr는 원래 STOCKS 배열 인덱스로 동작하므로
+  // 그룹을 나누되 각 종목의 원본 인덱스(i)는 그대로 유지한다.
+  const groups={};
+  STOCKS.forEach((s,i)=>{
+    const b=(s.brkr&&s.brkr.trim())?s.brkr.trim():'미분류';
+    (groups[b]=groups[b]||[]).push(i);
+  });
+  const keys=Object.keys(groups).sort((a,b)=>{
+    if(a==='미분류')return 1; if(b==='미분류')return -1;
+    return a.localeCompare(b,'ko');
+  });
+  wrap.innerHTML=keys.map(brkr=>{
+    const rows=groups[brkr].map(i=>{
+      const s=STOCKS[i];
+      return `<div class="mi">
         <div style="flex:1">
           <div class="miname">${s.name}${isETF(s.code)?'<span class="c-badge" style="margin-left:4px">ETF</span>':''}</div>
           <div class="micode" id="mc-${i}">${s.realCode||s.code}${s.brkr?' · <b style="color:var(--acc)">'+ s.brkr+'</b>':''}</div>
@@ -1972,14 +1994,15 @@ function renderMList(){
         <input class="mi-brkr" list="brkrList" value="${s.brkr||''}" placeholder="미분류" onchange="onBrkr(${i},this.value)">
         ${D[s.code]?.ok?'<span class="mibadge">✓</span>':''}
         <button class="btndel" onclick="delStock(${i})">×</button>
-      </div>`).join('')
-    :'<div style="color:var(--txt2);font-size:13px;padding:10px 0">종목이 없습니다.</div>';
+      </div>`;
+    }).join('');
+    return `<div class="mi-grp"><div class="mi-grp-hdr">🏦 ${brkr} <span class="mi-grp-cnt">${groups[brkr].length}개</span></div>${rows}</div>`;
+  }).join('');
 }
 function onBrkr(i,val){
   const v=val.trim(); STOCKS[i].brkr=v; saveStocks(STOCKS);
-  const mc=document.getElementById('mc-'+i);
-  if(mc) mc.innerHTML=`${STOCKS[i].realCode||STOCKS[i].code}${v?' · <b style="color:var(--acc)">'+ v+'</b>':''}`;
-  populateBrkrList(); renderBrkrTags(); render();
+  // 증권사가 바뀌면 속한 그룹도 바뀌므로 목록 전체를 다시 그림
+  renderMList(); render();
 }
 function delStock(i){
   if(!confirm(`"${STOCKS[i].name}" 삭제하시겠습니까?`))return;
