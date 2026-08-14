@@ -2272,11 +2272,17 @@ async function exportExcel() {
     const BG_HDR='FF1a1a3e',BG_BRKR='FF1f1f2e',BG_TOTAL='FF0d0d1a';
     const BG_EVEN='FF0c0c14',BG_ODD='FF1e1e32';   // 짝수=매우 어두운 남색, 홀수=보라빛 진회색
 
-    function ms({bold=false,color=C_GRAY,bg=null,align='right',sz=10}={}) {
+    function ms({bold=false,color=C_GRAY,bg=null,align='right',sz=10,border=null}={}) {
       const s={font:{sz,bold,color:{rgb:color}},alignment:{horizontal:align,vertical:'center'}};
       if(bg) s.fill={patternType:'solid',fgColor:{rgb:bg}};
+      if(border) s.border=border;
       return s;
     }
+    // 증권사별 컬럼/구간을 흰 선으로 구분
+    const BRKR_DIV     = {left:{style:'thin',color:{rgb:'FFFFFFFF'}}};
+    const BRKR_DIV_TOP = {top: {style:'thin',color:{rgb:'FFFFFFFF'}}};
+    function withDiv(cell){ if(cell&&cell.s) cell.s={...cell.s,border:BRKR_DIV}; return cell; }
+    function withTopDiv(cell){ if(cell&&cell.s) cell.s={...cell.s,border:BRKR_DIV_TOP}; return cell; }
     function hC(v){return{v,t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})};}
     function sC(v,bg,bold=false){return{v:v??'',t:'s',s:ms({align:'left',color:bold?C_WHITE:C_GRAY,bg,bold})};}
     function nC(v,bg,bold=false){
@@ -2403,6 +2409,7 @@ async function exportExcel() {
         ]);
       });
       const bGR=bs.ok&&bs.tI>0?bs.gain/bs.tI:null;
+      // 소계 행 위쪽에 흰 선을 그어 이전 증권사 그룹과 확실히 구분
       r1.push([
         {v:`▶ ${brkr} 소계`,t:'s',s:ms({bold:true,color:C_GOLD,bg:BG_BRKR,align:'left',sz:11})},
         ...Array(10).fill(null).map(()=>({v:'',t:'s',s:ms({bg:BG_BRKR})})),
@@ -2410,7 +2417,7 @@ async function exportExcel() {
         bs.ok?{v:Math.round(bs.tE),t:'n',z:'#,##0',s:ms({bold:true,color:C_GOLD,bg:BG_BRKR})}:{v:'',t:'s',s:ms({bg:BG_BRKR})},
         brkrN(bs.ok?bs.gain:null),brkrP(bGR),brkrN(bs.ok?bs.tw:null),
         {v:'',t:'s',s:ms({bg:BG_BRKR})},
-      ]);
+      ].map(withTopDiv));
     });
     const ws1=buildSheet(r1);
     ws1['!cols']=[12,16,10,12,12,8,7,7,12,8,12,14,14,14,8,12,8].map(w=>({wch:w}));
@@ -2440,19 +2447,26 @@ async function exportExcel() {
     } catch(e) { /* 서버 미연결 → 로컬 이력만 사용 */ }
 
     /* ── 시트2: 포트폴리오이력 ── */
-    const BRKRS=['카카오','토스','미래에셋','키움'];
-    const BRKR_DISP=['카카오','토스','미래','키움'];
-    // 헤더 2행: 기본 8컬럼 + 매입금(증권사4)/평가금(4)/수익률(4)
+    // 증권사 목록은 고정하지 않고 이력(hist) + 현재 등록된 증권사를 모두 모아 자동 반영
+    // (새 증권사(예: 신한)를 추가하면 다음 내보내기부터 자동으로 컬럼이 생김)
+    const brkrSet=new Set();
+    hist.forEach(h=>(h.stocks||[]).forEach(s=>{ if(s.brkr) brkrSet.add(s.brkr); }));
+    (typeof activeBrkrs==='function'?activeBrkrs():[]).forEach(b=>brkrSet.add(b));
+    const BRKRS = brkrSet.size ? [...brkrSet].sort((a,b)=>a.localeCompare(b,'ko')) : ['카카오','토스','미래에셋','키움'];
+    const BRKR_DISP = BRKRS.map(b => b==='미래에셋' ? '미래' : (b.length>4 ? b.slice(0,4) : b));
+    const N = BRKRS.length;
+    // 헤더 2행: 기본 8컬럼 + 매입금(증권사N)/평가금(N)/수익률(N)
     const h2a=[...'날짜,종목수,상승,하락,투자원금,평가금액,손익금액,수익률%'.split(',').map(hC),
       {v:'매입금',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},
-      ...Array(3).fill({v:'',t:'s',s:ms({bg:BG_HDR})}),
+      ...Array(N-1).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
       {v:'평가금',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},
-      ...Array(3).fill({v:'',t:'s',s:ms({bg:BG_HDR})}),
+      ...Array(N-1).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
       {v:'수익률',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},
-      ...Array(3).fill({v:'',t:'s',s:ms({bg:BG_HDR})}),
+      ...Array(N-1).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
     ];
-    const h2b=[...Array(8).fill({v:'',t:'s',s:ms({bg:BG_HDR})}),
-      ...BRKR_DISP.map(b=>hC(b)),...BRKR_DISP.map(b=>hC(b)),...BRKR_DISP.map(b=>hC(b)),
+    // 증권사별 컬럼 경계마다 흰 세로선을 넣어 각 증권사 칸을 눈으로 구분되게 함
+    const h2b=[...Array(8).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
+      ...BRKR_DISP.map(b=>withDiv(hC(b))),...BRKR_DISP.map(b=>withDiv(hC(b))),...BRKR_DISP.map(b=>withDiv(hC(b))),
     ];
     const r2=[h2a,h2b];
     hist.forEach((h,i)=>{
@@ -2473,18 +2487,18 @@ async function exportExcel() {
         p.totE!=null?evalC(p.totE,p.totI,bg):blk(bg),
         p.gain!=null?nC(p.gain,bg):blk(bg),
         p.ret!=null?pC(p.ret,bg):blk(bg),
-        ...BRKRS.map(b=>brkrI[b]>0?invC(brkrI[b],bg):blk(bg)),
-        ...BRKRS.map(b=>brkrE[b]>0?evalC(brkrE[b],brkrI[b],bg):blk(bg)),
-        ...BRKRS.map(b=>brkrI[b]>0&&brkrE[b]>0?pC((brkrE[b]-brkrI[b])/brkrI[b],bg):blk(bg)),
+        ...BRKRS.map(b=>withDiv(brkrI[b]>0?invC(brkrI[b],bg):blk(bg))),
+        ...BRKRS.map(b=>withDiv(brkrE[b]>0?evalC(brkrE[b],brkrI[b],bg):blk(bg))),
+        ...BRKRS.map(b=>withDiv(brkrI[b]>0&&brkrE[b]>0?pC((brkrE[b]-brkrI[b])/brkrI[b],bg):blk(bg))),
       ]);
     });
     const ws2=buildSheet(r2);
-    ws2['!cols']=[12,8,8,8,14,14,14,10,12,12,12,12,12,12,12,12,8,8,8,8].map(w=>({wch:w}));
+    ws2['!cols']=[12,8,8,8,14,14,14,10,...Array(N).fill(12),...Array(N).fill(12),...Array(N).fill(8)].map(w=>({wch:w}));
     ws2['!rows']=[{hpt:22}];
     ws2['!merges']=[
-      {s:{r:0,c:8},e:{r:0,c:11}},
-      {s:{r:0,c:12},e:{r:0,c:15}},
-      {s:{r:0,c:16},e:{r:0,c:19}},
+      {s:{r:0,c:8},        e:{r:0,c:8+N-1}},
+      {s:{r:0,c:8+N},      e:{r:0,c:8+2*N-1}},
+      {s:{r:0,c:8+2*N},    e:{r:0,c:8+3*N-1}},
     ];
     XLSX.utils.book_append_sheet(wb,ws2,'포트폴리오이력');
 
