@@ -119,6 +119,11 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .pl-r{font-weight:700;font-size:12px;min-width:46px;text-align:right;font-variant-numeric:tabular-nums}
 .pl-r.up{color:var(--up)}.pl-r.dn{color:var(--dn)}.pl-r.flat{color:var(--txt2)}
 .pl-hi{border-top:1px solid var(--brd2);margin-top:3px;padding-top:3px}
+/* 전체/오늘: 금액과 퍼센트가 겹치지 않도록 두 줄로 분리 */
+.pl-row-2l{flex-direction:column;align-items:stretch;gap:0}
+.pl-row-2l .pl-row-top{display:flex;align-items:center;gap:4px;width:100%}
+.pl-row-2l .pl-row-top .pl-v{flex:1;min-width:0}
+.pl-row-pct{display:flex;justify-content:flex-end;padding-top:1px}
 .pl-sep{border-top:1px solid var(--brd2);margin-top:2px;padding-top:2px}
 /* 스켈레톤 */
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
@@ -1495,9 +1500,9 @@ function cardOf(d) {
   const pl=`<div class="card-pl">
     ${peakTot!=null?`<div class="pl-row"><span class="pl-l">피 크</span><span class="pl-v flat">${fmtA(peakTot)}</span>${peakR!=null?`<span class="pl-r ${rCls(peakR)}">${fmtR(peakR)}</span>`:''}</div>`:''}
     ${totI!=null?`<div class="pl-row"><span class="pl-l">원 금</span><span class="pl-v flat">${fmtA(totI)}</span></div>`:''}
-    ${totE!=null?`<div class="pl-row"><span class="pl-l">현 재</span><span class="pl-v flat">${fmtA(totE)}</span></div>`:''}
-    ${gain!=null?`<div class="pl-row pl-hi"><span class="pl-l">전 체</span><span class="pl-v ${rCls(gain)}">${fmtPW(gain)}</span>${gainR!=null?`<span class="pl-r ${rCls(gainR)}">${fmtR(gainR)}</span>`:''}</div>`:''}
-    ${todayW!=null?`<div class="pl-row"><span class="pl-l">오 늘</span><span class="pl-v ${rCls(todayW)}">${fmtPW(todayW)}</span>${chgR!=null?`<span class="pl-r ${rCls(chgR)}">${fmtR(chgR)}</span>`:''}</div>`:''}
+    ${totE!=null?`<div class="pl-row"><span class="pl-l">현 재</span><span class="pl-v ${rCls(gain)}">${fmtA(totE)}</span></div>`:''}
+    ${gain!=null?`<div class="pl-row pl-hi pl-row-2l"><div class="pl-row-top"><span class="pl-l">전 체</span><span class="pl-v ${rCls(gain)}">${fmtPW(gain)}</span></div>${gainR!=null?`<div class="pl-row-pct"><span class="pl-r ${rCls(gainR)}">${fmtR(gainR)}</span></div>`:''}</div>`:''}
+    ${todayW!=null?`<div class="pl-row pl-row-2l"><div class="pl-row-top"><span class="pl-l">오 늘</span><span class="pl-v ${rCls(todayW)}">${fmtPW(todayW)}</span></div>${chgR!=null?`<div class="pl-row-pct"><span class="pl-r ${rCls(chgR)}">${fmtR(chgR)}</span></div>`:''}</div>`:''}
     ${buyR!=null&&!totI?`<div class="pl-row"><span class="pl-l">매 수</span><span class="pl-r ${rCls(buyR)}">${fmtR(buyR)}</span></div>`:''}
     <div class="pl-sep"></div>
     <div class="action-row">
@@ -2278,11 +2283,15 @@ async function exportExcel() {
       if(border) s.border=border;
       return s;
     }
-    // 증권사별 컬럼/구간을 흰 선으로 구분
-    const BRKR_DIV     = {left:{style:'thin',color:{rgb:'FFFFFFFF'}}};
-    const BRKR_DIV_TOP = {top: {style:'thin',color:{rgb:'FFFFFFFF'}}};
-    function withDiv(cell){ if(cell&&cell.s) cell.s={...cell.s,border:BRKR_DIV}; return cell; }
-    function withTopDiv(cell){ if(cell&&cell.s) cell.s={...cell.s,border:BRKR_DIV_TOP}; return cell; }
+    // 증권사별 컬럼/구간을 흰 선으로 구분 (여러 테두리를 합쳐 적용 — 기존 border 유지하며 추가)
+    function addBorder(cell, side, style='thin'){
+      if(!cell||!cell.s) return cell;
+      cell.s={...cell.s, border:{...(cell.s.border||{}), [side]:{style,color:{rgb:'FFFFFFFF'}}}};
+      return cell;
+    }
+    function withDiv(cell,style='thin'){ return addBorder(cell,'left',style); }
+    function withTopDiv(cell){ return addBorder(cell,'top'); }
+    function withBottomDiv(cell,style){ return addBorder(cell,'bottom',style); }
     function hC(v){return{v,t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})};}
     function sC(v,bg,bold=false){return{v:v??'',t:'s',s:ms({align:'left',color:bold?C_WHITE:C_GRAY,bg,bold})};}
     function nC(v,bg,bold=false){
@@ -2376,8 +2385,9 @@ async function exportExcel() {
     ]);
     // ③ 증권사별 그룹 (각 그룹 뒤에 소계)
     let even=true;
-    Object.entries(brkrMap).forEach(([brkr,stocks])=>{
+    Object.entries(brkrMap).forEach(([brkr,stocks],gi)=>{
       const bs={tI:0,tE:0,gain:0,tw:0,ok:false};
+      let firstRow=true;
       stocks.forEach(s=>{
         const d=D[s.code];if(!d)return;
         const bp=BP[d.code],qty=QTY[d.code];
@@ -2393,7 +2403,7 @@ async function exportExcel() {
         if(g!=null)bs.gain+=g;
         if(tw!=null)bs.tw+=tw;
         const bg=even?BG_EVEN:BG_ODD;even=!even;
-        r1.push([sC(brkr,bg),sC(d.name,bg),sC(d.realCode||d.code,bg),
+        let row=[sC(brkr,bg),sC(d.name,bg),sC(d.realCode||d.code,bg),
           d.ok&&d.px!=null?pxC(d.px,bg):sC('조회실패',bg),
           d.ok&&chgW!=null?nC(chgW,bg):blk(bg),
           d.ok&&chgR!=null?pC(chgR,bg):blk(bg),
@@ -2406,10 +2416,13 @@ async function exportExcel() {
           g!=null?nC(g,bg):blk(bg),gR!=null?pC(gR,bg):blk(bg),
           tw!=null?nC(tw,bg):blk(bg),
           d.frgnRatio!=null?{v:d.frgnRatio,t:'n',z:'0.0',s:ms({color:C_GRAY,bg})}:blk(bg),
-        ]);
+        ];
+        // 새 증권사 그룹이 시작되는 첫 행 위쪽에 흰 선을 그어 이전 그룹(소계)과 구분
+        if(firstRow&&gi>0) row=row.map(withTopDiv);
+        firstRow=false;
+        r1.push(row);
       });
       const bGR=bs.ok&&bs.tI>0?bs.gain/bs.tI:null;
-      // 소계 행 위쪽에 흰 선을 그어 이전 증권사 그룹과 확실히 구분
       r1.push([
         {v:`▶ ${brkr} 소계`,t:'s',s:ms({bold:true,color:C_GOLD,bg:BG_BRKR,align:'left',sz:11})},
         ...Array(10).fill(null).map(()=>({v:'',t:'s',s:ms({bg:BG_BRKR})})),
@@ -2417,7 +2430,7 @@ async function exportExcel() {
         bs.ok?{v:Math.round(bs.tE),t:'n',z:'#,##0',s:ms({bold:true,color:C_GOLD,bg:BG_BRKR})}:{v:'',t:'s',s:ms({bg:BG_BRKR})},
         brkrN(bs.ok?bs.gain:null),brkrP(bGR),brkrN(bs.ok?bs.tw:null),
         {v:'',t:'s',s:ms({bg:BG_BRKR})},
-      ].map(withTopDiv));
+      ]);
     });
     const ws1=buildSheet(r1);
     ws1['!cols']=[12,16,10,12,12,8,7,7,12,8,12,14,14,14,8,12,8].map(w=>({wch:w}));
@@ -2457,17 +2470,22 @@ async function exportExcel() {
     const N = BRKRS.length;
     // 헤더 2행: 기본 8컬럼 + 매입금(증권사N)/평가금(N)/수익률(N)
     const h2a=[...'날짜,종목수,상승,하락,투자원금,평가금액,손익금액,수익률%'.split(',').map(hC),
-      {v:'매입금',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},
+      withDiv({v:'매입금',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},'medium'),
       ...Array(N-1).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
-      {v:'평가금',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},
+      withDiv({v:'평가금',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},'medium'),
       ...Array(N-1).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
-      {v:'수익률',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},
+      withDiv({v:'수익률',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_HDR,align:'center',sz:11})},'medium'),
       ...Array(N-1).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
     ];
-    // 증권사별 컬럼 경계마다 흰 세로선을 넣어 각 증권사 칸을 눈으로 구분되게 함
+    // 증권사별 컬럼 경계마다 흰 세로선(각 그룹의 첫 증권사 칸은 굵게)을 넣어
+    // 매입금/평가금/수익률 큰 구간과 그 안의 증권사별 칸을 모두 눈으로 구분되게 함
+    function brkrHeaderCells(){ return BRKR_DISP.map((b,idx)=>withDiv(hC(b), idx===0?'medium':'thin')); }
     const h2b=[...Array(8).fill(0).map(()=>({v:'',t:'s',s:ms({bg:BG_HDR})})),
-      ...BRKR_DISP.map(b=>withDiv(hC(b))),...BRKR_DISP.map(b=>withDiv(hC(b))),...BRKR_DISP.map(b=>withDiv(hC(b))),
+      ...brkrHeaderCells(),...brkrHeaderCells(),...brkrHeaderCells(),
     ];
+    // 상단메뉴(헤더 2줄) 구분선: 1행 아래(제목↔증권사명)에 얇은 선, 2행 아래(헤더↔데이터)에 굵은 선
+    h2a.forEach(c=>withBottomDiv(c));
+    h2b.forEach(c=>withBottomDiv(c,'medium'));
     const r2=[h2a,h2b];
     hist.forEach((h,i)=>{
       const p=h.portfolio,bg=i%2===0?BG_EVEN:BG_ODD;
@@ -2479,6 +2497,7 @@ async function exportExcel() {
           if(s.totE!=null)brkrE[s.brkr]+=s.totE;
         }
       });
+      const brkrCells=mapFn=>BRKRS.map((b,idx)=>withDiv(mapFn(b), idx===0?'medium':'thin'));
       r2.push([sC(h.date,bg),
         {v:p.stockCnt||0,t:'n',s:ms({color:C_GRAY,bg})},
         {v:p.upCnt||0,t:'n',s:ms({color:C_UP,bg})},
@@ -2487,9 +2506,9 @@ async function exportExcel() {
         p.totE!=null?evalC(p.totE,p.totI,bg):blk(bg),
         p.gain!=null?nC(p.gain,bg):blk(bg),
         p.ret!=null?pC(p.ret,bg):blk(bg),
-        ...BRKRS.map(b=>withDiv(brkrI[b]>0?invC(brkrI[b],bg):blk(bg))),
-        ...BRKRS.map(b=>withDiv(brkrE[b]>0?evalC(brkrE[b],brkrI[b],bg):blk(bg))),
-        ...BRKRS.map(b=>withDiv(brkrI[b]>0&&brkrE[b]>0?pC((brkrE[b]-brkrI[b])/brkrI[b],bg):blk(bg))),
+        ...brkrCells(b=>brkrI[b]>0?invC(brkrI[b],bg):blk(bg)),
+        ...brkrCells(b=>brkrE[b]>0?evalC(brkrE[b],brkrI[b],bg):blk(bg)),
+        ...brkrCells(b=>brkrI[b]>0&&brkrE[b]>0?pC((brkrE[b]-brkrI[b])/brkrI[b],bg):blk(bg)),
       ]);
     });
     const ws2=buildSheet(r2);
@@ -2500,6 +2519,8 @@ async function exportExcel() {
       {s:{r:0,c:8+N},      e:{r:0,c:8+2*N-1}},
       {s:{r:0,c:8+2*N},    e:{r:0,c:8+3*N-1}},
     ];
+    // 1~2행(헤더 2줄) 틀고정 — 스크롤해도 헤더가 항상 보이게
+    ws2['!freeze']={xSplit:0,ySplit:2,topLeftCell:'A3',activePane:'bottomLeft',state:'frozen'};
     XLSX.utils.book_append_sheet(wb,ws2,'포트폴리오이력');
 
     /* ── 시트3: 종목이력 (매수단가~오늘손익 제거) ── */
