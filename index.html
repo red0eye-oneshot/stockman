@@ -813,7 +813,9 @@ async function loadRecommendDates() {
         // PC가 대신 파싱해서 클라우드로 올려줘야 함 (포트폴리오 동기화와 동일한 방식).
         if (SRV === '') {
           try {
-            const ctrl = new AbortController(); const tid = setTimeout(()=>ctrl.abort(), 15000);
+            // Render 무료 서버는 잠들어 있으면 깨어나는 데 최대 60초 가까이 걸릴 수 있어
+            // 타임아웃을 넉넉히 잡음 (너무 짧으면 push가 중간에 끊겨 폰에 반영이 안 됨)
+            const ctrl = new AbortController(); const tid = setTimeout(()=>ctrl.abort(), 60000);
             await apiFetch(`${CLOUD_SRV}/api/recommend_dates`, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
@@ -919,7 +921,9 @@ async function pushPortfolio() {
   const isLocal = srv === '';
   if (isLocal) {
     try {
-      const ctrl = new AbortController(); const tid = setTimeout(()=>ctrl.abort(), 15000);
+      // Render 무료 서버가 잠들어 있으면 깨는 데 최대 60초 가까이 걸릴 수 있음.
+      // 타임아웃이 너무 짧으면 push가 중간에 끊겨서 폰이 최신 종목(예: 새 증권사)을 못 받는다.
+      const ctrl = new AbortController(); const tid = setTimeout(()=>ctrl.abort(), 60000);
       await apiFetch(`${CLOUD_SRV}/api/portfolio`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -936,7 +940,7 @@ async function pullPortfolio() {
   const url = SRV ? `${SRV}/api/portfolio` : '/api/portfolio';
   try {
     const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 10000); // 10초 타임아웃
+    const tid = setTimeout(() => ctrl.abort(), 30000); // Render 콜드스타트 대비 넉넉한 타임아웃
     const r = await apiFetch(url, {signal: ctrl.signal});
     clearTimeout(tid);
     if (!r.ok) return false;
