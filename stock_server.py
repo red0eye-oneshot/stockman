@@ -919,12 +919,13 @@ def get_stock_data(code: str) -> dict:
 
     print(f"  조회: {code}", end="", flush=True)
     try:
-        # ── 4개 fetch를 동시에 병렬 실행 (컨센서스 제거 - UI 미사용) ────
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        # ── 5개 fetch를 동시에 병렬 실행 (컨센서스 목표가 포함) ────
+        with ThreadPoolExecutor(max_workers=5) as ex:
             f_candles = ex.submit(fetch_candles, code)
             f_price   = ex.submit(fetch_price_naver, code)
             f_inv     = ex.submit(fetch_investor_data, code)
             f_fin     = ex.submit(fetch_financial_summary, code)
+            f_cons    = ex.submit(fetch_consensus_data, code)
 
             candles  = f_candles.result(timeout=30)
             try:
@@ -939,6 +940,15 @@ def get_stock_data(code: str) -> dict:
                 fin_data = f_fin.result(timeout=30)
             except Exception:
                 fin_data = {'eps': None, 'per': None}
+            try:
+                cons_data = f_cons.result(timeout=20)
+            except Exception:
+                cons_data = {
+                    'opinionScore': None, 'targetPrice': None,
+                    'consensusEps': None, 'consensusPer': None,
+                    'institutionCount': None, 'baseDate': None,
+                    'consensusAvgTarget': None, 'consensus': [],
+                }
 
         today_str = datetime.now().strftime('%Y-%m-%d')
 
@@ -996,14 +1006,14 @@ def get_stock_data(code: str) -> dict:
             'invDaily':  inv_data.get('invDaily', []),
             'indivDaily': inv_data.get('indivDaily', []),
             'candles': spark,
-            'consensus':          [],
-            'consensusAvgTarget': None,
-            'opinionScore':       None,
-            'targetPrice':        None,
-            'consensusEps':       None,
-            'consensusPer':       None,
-            'institutionCount':   None,
-            'baseDate':           None,
+            'consensus':          cons_data.get('consensus', []),
+            'consensusAvgTarget': cons_data.get('consensusAvgTarget'),
+            'opinionScore':       cons_data.get('opinionScore'),
+            'targetPrice':        cons_data.get('targetPrice'),
+            'consensusEps':       cons_data.get('consensusEps'),
+            'consensusPer':       cons_data.get('consensusPer'),
+            'institutionCount':   cons_data.get('institutionCount'),
+            'baseDate':           cons_data.get('baseDate'),
             'eps':  fin_data.get('eps'),
             'per':  fin_data.get('per'),
         }
