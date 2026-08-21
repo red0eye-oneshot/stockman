@@ -696,50 +696,37 @@ def fetch_consensus_data(code: str) -> dict:
         if dm:
             result['baseDate'] = dm.group(1)
 
-        # ── 집계 테이블 파싱 ──────────────────────────────────────
-        # 전략: "투자의견" 헤더가 포함된 테이블의 tbody 첫 번째 행에서 5개 값 추출
+        # ── 투자의견|목표주가 박스 파싱 ──────────────────────────
+        # 현재 네이버 구조: <caption>투자의견</caption> ... 목표주가</th><td>
+        #   <span class="f_up"><em>4.00</em>매수</span><span class="bar">|</span><em>141,050</em>
+        # </td>  (데이터 없으면 <em>N/A</em>)
         def _to_f(s):
             if not s: return None
             s = str(s).strip().replace(',', '').replace('\xa0', '').replace(' ', '')
-            if not s or s in ('-', '—'): return None
+            if not s or s in ('-', '—', 'N/A'): return None
             try: return float(s)
             except: return None
 
         tbl_blk = re.search(
-            r'투자의견[\s\S]{0,600}?<tbody[^>]*>([\s\S]{0,2000}?)</tbody>',
+            r'투자의견\s*</caption>[\s\S]{0,300}?목표주가\s*</th>\s*<td[^>]*>([\s\S]{0,400}?)</td>',
             html
         )
+        if not tbl_blk:
+            idx = html.find('투자의견')
+            if idx == -1:
+                _log(f"  [컨센서스디버그] {code}: '투자의견' 텍스트 자체가 페이지에 없음")
+            else:
+                snippet = re.sub(r'\s+', ' ', html[idx:idx+700])
+                _log(f"  [컨센서스디버그] {code} 투자의견 주변: {snippet}")
         if tbl_blk:
-            row_m = re.search(r'<tr[^>]*>([\s\S]*?)</tr>', tbl_blk.group(1))
-            if row_m:
-                cells_raw = re.findall(r'<td[^>]*>([\s\S]*?)</td>', row_m.group(1))
-                cells = []
-                for c in cells_raw:
-                    txt = re.sub(r'<[^>]+>', ' ', c)
-                    txt = re.sub(r'\s+', ' ', txt).strip().replace(',', '').replace('\xa0', '').strip()
-                    cells.append(txt)
-                _log(f"  [컨센서스] {code} cells={cells[:6]}")
-                if len(cells) >= 5:
-                    result['opinionScore']     = _to_f(cells[0])
-                    v1 = _to_f(cells[1])
-                    result['targetPrice']      = int(v1) if v1 else None
-                    result['consensusEps']     = _to_f(cells[2])
-                    result['consensusPer']     = _to_f(cells[3])
-                    v4 = _to_f(cells[4])
-                    result['institutionCount'] = int(v4) if v4 else None
-                    result['consensusAvgTarget'] = result['targetPrice']
-
-        # ── 점수 보완 패턴 (테이블 파싱 실패 시) ────────────────────
-        if result['opinionScore'] is None:
-            for pat in [
-                r'class=["\'][^"\']*pointer[^"\']*["\'][^>]*>\s*([1-5]\.\d{2})',
-                r'<em[^>]*class=["\'][^"\']*num[^"\']*["\'][^>]*>\s*([1-5]\.\d{2})\s*</em>',
-                r'투자의견[^<]{0,80}<[^>]*>\s*([1-5]\.\d{2})',
-            ]:
-                m = re.search(pat, html)
-                if m:
-                    try: result['opinionScore'] = float(m.group(1)); break
-                    except: pass
+            ems = re.findall(r'<em>([^<]*)</em>', tbl_blk.group(1))
+            ems = [re.sub(r'\s+', '', e) for e in ems]
+            _log(f"  [컨센서스] {code} ems={ems}")
+            if len(ems) >= 2:
+                result['opinionScore'] = _to_f(ems[0])
+                v1 = _to_f(ems[1])
+                result['targetPrice']  = int(v1) if v1 else None
+                result['consensusAvgTarget'] = result['targetPrice']
 
         if any(v is not None for v in [
             result['opinionScore'], result['targetPrice'], result['institutionCount']
