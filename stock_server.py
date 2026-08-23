@@ -745,6 +745,364 @@ def fetch_consensus_data(code: str) -> dict:
     return empty
 
 
+# ── 시장 지수 (코스피/코스닥/환율/해외지수/비트코인) ─────────────
+_mkt_cache: dict = {'ts': 0, 'data': None}
+_mkt_lock  = threading.Lock()
+_mkt_logged: set = set()   # 원본 응답 디버그 로그 1회만 찍기 위한 dedup
+MKT_TTL = 30                # 30초 캐시
+
+def _mkt_num(s):
+    if s is None: return None
+    try:
+        return float(str(s).replace(',', '').replace(' ', '').replace('%', ''))
+    except (TypeError, ValueError):
+        return None
+
+def _mkt_log_once(key, msg):
+    if key not in _mkt_logged:
+        _mkt_logged.add(key)
+        _log(msg)
+
+def _clean_snippet(html, length=3000, anchor=None):
+    """디버그용: <script>/<style> 걷어내고 실제 보이는 마크업만 남긴 스니펫.
+       anchor가 주어지고 본문에서 발견되면 그 지점부터 잘라서 반환 (헤드/내비 낭비 방지)."""
+    c = re.sub(r'<script[\s\S]*?</script>', '', html)
+    c = re.sub(r'<style[\s\S]*?</style>', '', c)
+    c = re.sub(r'\s+', ' ', c)
+    if anchor:
+        idx = c.find(anchor)
+        if idx != -1:
+            start = max(0, idx - 200)
+            return c[start:start + length]
+    return c[:length]
+
+def _digit_spans_to_str(fragment):
+    """<span class="noN">N</span> / <span class="jum">.</span> 자릿수 span 시퀀스를 숫자 문자열로 변환 (콤마=shim은 무시)"""
+    parts = re.findall(r'<span class="no\d">(\d)</span>|<span class="jum">(\.)</span>', fragment)
+    s = ''.join(a or b for a, b in parts)
+    return s or None
+
+def _parse_naver_digitspan_quote(html):
+    """네이버 구형 '자릿수 span' 시세 위젯 파싱 (환율 페이지 등에서 사용, id=_nowVal 없음)
+       예: <p class="no_today"> <em class="no_down"> <span class="no_down">
+             <span class="no1">1</span><span class="shim">,</span><span class="no3">3</span>...
+           </span> </em> ... </p>
+    """
+    val = chg = pct = None
+
+    m = re.search(r'<p class="no_today">([\s\S]{0,500}?)</p>', html)
+    if m:
+        s = _digit_spans_to_str(m.group(1))
+        if s:
+            try: val = float(s)
+            except ValueError: pass
+
+    m2 = re.search(r'<p class="no_exday">([\s\S]{0,700}?)</p>', html)
+    if m2:
+        block = m2.group(1)
+        em_m = re.search(r'<em class="no_(up|down)">([\s\S]{0,250}?)</em>', block)
+        if em_m:
+            sign = -1 if em_m.group(1) == 'down' else 1
+            s = _digit_spans_to_str(em_m.group(2))
+            if s:
+                try: chg = sign * float(s)
+                except ValueError: pass
+        pm = re.search(r'parenthesis1[\s\S]{0,300}?parenthesis2', block)
+        if pm:
+            seg = pm.group(0)
+            sign2 = -1 if 'minus' in seg else 1
+            s2 = _digit_spans_to_str(seg)
+            if s2:
+                try: pct = sign2 * float(s2)
+                except ValueError: pass
+
+    return val, chg, pct
+
+def _parse_generic_quote(html):
+    """네이버 금융 공통 시세 위젯 패턴 여러 개를 시도 (id=_nowVal 계열 → class=num 계열 → 자릿수 span 계열)"""
+    val = chg = pct = None
+
+    m = re.search(r'id=["\']_nowVal["\'][^>]*>\s*(?:<[^>]*>\s*)?([\d,]+\.?\d*)', html)
+    if not m:
+        m = re.search(r'<span class="num">\s*([\d,]+\.?\d*)\s*</span>', html)
+    if m:
+        val = _mkt_num(m.group(1))
+
+    if val is not None:
+        m2 = re.search(r'id=["\']_change["\'][^>]*>([\s\S]{0,80}?)([\d,]+\.?\d*)', html)
+        if m2:
+            raw = _mkt_num(m2.group(2))
+            if raw is not None:
+                chg = -raw if re.search(r'down|하락|dn|_ico_dn|red|fall', m2.group(0), re.I) and \
+                              not re.search(r'up|상승|rise', m2.group(0), re.I) else raw
+        if chg is None:
+            m3 = re.search(r'<span class="range">\s*([\-+]?[\d,]+\.?\d*)\s*</span>', html)
+            if m3: chg = _mkt_num(m3.group(1))
+
+        m4 = re.search(r'id=["\']_rate["\'][^>]*>([\s\S]{0,80}?)([\-+]?[\d,]+\.?\d*)\s*%', html)
+        if m4:
+            pct = _mkt_num(m4.group(2))
+        if pct is None:
+            m5 = re.search(r'<span class="rate">\s*\(?([\-+]?[\d,]+\.?\d*)%?\)?\s*</span>', html)
+            if m5: pct = _mkt_num(m5.group(1))
+        if pct is not None and chg is not None and ((pct > 0) != (chg > 0)) and chg != 0:
+            pct = -pct  # 부호 불일치 보정
+        return val, chg, pct
+
+    # id=_nowVal / class=num 둘 다 실패 → 자릿수 span 템플릿 시도
+    return _parse_naver_digitspan_quote(html)
+
+def _mstock_num_from(j: dict, keys: tuple):
+    for k in keys:
+        v = j.get(k)
+        if v is None: continue
+        n = _mkt_num(v)
+        if n is not None: return n
+    return None
+
+def _fetch_mstock_json(url: str, dbg_key: str):
+    """m.stock.naver.com 모바일 API 공통 시도 (종목 시세 조회에서 이미 검증된 방식과 동일 패턴).
+       성공 시 (val, chg, pct) / 실패 시 (None, None, None). 원본 JSON은 1회만 디버그 로그."""
+    try:
+        r = SESSION.get(url, headers=HEADERS, timeout=8)
+        if r.status_code != 200:
+            _mkt_log_once(dbg_key, f"  [지수디버그] mstock {dbg_key} HTTP {r.status_code} url={url}")
+            return None, None, None
+        j = r.json()
+        _mkt_log_once(dbg_key + '_raw', f"  [지수디버그] mstock {dbg_key} raw={str(j)[:600]}")
+        val = _mstock_num_from(j, ('closePrice','now','nowValue','indexValue','currentValue','tradePrice','stockEndPrice'))
+        chg = _mstock_num_from(j, ('compareToPreviousClosePrice','changeValue','fluctuations','changePrice'))
+        pct = _mstock_num_from(j, ('fluctuationsRatio','changeRate','risingRate','fluctuationsRate'))
+        return val, chg, pct
+    except Exception as e:
+        _log(f"  [지수ERR] mstock {dbg_key}: {type(e).__name__}: {e}")
+        return None, None, None
+
+def fetch_domestic_index(code: str, key: str) -> dict:
+    """코스피/코스닥 실시간 지수 (모바일 JSON API 우선 → 실패 시 HTML 페이지 백업)"""
+    out = {key: {'value': None, 'change': None, 'changePct': None, 'ok': False}}
+
+    val, chg, pct = _fetch_mstock_json(f"https://m.stock.naver.com/api/index/{code}/basic", key)
+    if val is not None:
+        out[key] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+        return out
+
+    try:
+        url = f"https://finance.naver.com/sise/sise_index.naver?code={code}"
+        r = SESSION.get(url, headers={**HEADERS, "Accept": "text/html,*/*"}, timeout=8)
+        html = r.text
+        val, chg, pct = _parse_generic_quote(html)
+        if val is None:
+            _mkt_log_once(key + '_html', f"  [지수디버그] domestic {key}({code}) HTTP {r.status_code} "
+                                          f"len={len(html)} snippet={_clean_snippet(html)}")
+        else:
+            out[key] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+    except Exception as e:
+        _log(f"  [지수ERR] domestic {key}: {type(e).__name__}: {e}")
+    return out
+
+def fetch_exchange_rate() -> dict:
+    """달러/원 환율 (모바일 JSON API 우선 → 실패 시 HTML 페이지 백업)"""
+    out = {'usdkrw': {'value': None, 'change': None, 'changePct': None, 'ok': False}}
+
+    val, chg, pct = _fetch_mstock_json("https://m.stock.naver.com/api/marketindex/exchange/FX_USDKRW", 'fx')
+    if val is not None:
+        out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+        return out
+
+    try:
+        url = "https://finance.naver.com/marketindex/exchangeDetail.naver?marketindexCd=FX_USDKRW"
+        r = SESSION.get(url, headers={**HEADERS, "Accept": "text/html,*/*"}, timeout=8)
+        html = r.text
+        val, chg, pct = _parse_generic_quote(html)
+        if val is None:
+            _mkt_log_once('fx_html', f"  [지수디버그] FX HTTP {r.status_code} "
+                                      f"len={len(html)} snippet={_clean_snippet(html)}")
+        else:
+            out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+    except Exception as e:
+        _log(f"  [지수ERR] FX: {type(e).__name__}: {e}")
+    return out
+
+def fetch_btc() -> dict:
+    """비트코인 원화 시세 (Upbit 공개 API)"""
+    out = {}
+    try:
+        url = "https://api.upbit.com/v1/ticker?markets=KRW-BTC"
+        r = SESSION.get(url, headers={"Accept": "application/json"}, timeout=8)
+        j = r.json()
+        if isinstance(j, list) and j:
+            d = j[0]
+            val = _mkt_num(d.get('trade_price'))
+            chg = _mkt_num(d.get('signed_change_price'))
+            pct = _mkt_num(d.get('signed_change_rate'))
+            if pct is not None: pct *= 100
+            out['btc'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': val is not None}
+        else:
+            _log(f"  [지수ERR] BTC: 데이터 없음 raw={str(j)[:300]}")
+    except Exception as e:
+        _log(f"  [지수ERR] BTC: {type(e).__name__}: {e}")
+    return out
+
+# 해외지수 심볼 후보 (네이버 world 페이지 기준) + 실패 시 목록 페이지에서 자동 탐색할 검색어
+WORLD_SYMS = {
+    'nasdaq': {'symbols': ['NAS@IXIC'],                        'discover': '나스닥종합',
+               'mstock': ['.IXIC', 'IXIC']},
+    'sp500':  {'symbols': ['SPI@SPX'],                         'discover': 'S&amp;P500',
+               'mstock': ['.INX', '.SPX', 'SPX']},
+    'vix':    {'symbols': ['CBO@VIX', 'CBOE@VIX'],             'discover': 'VIX',
+               'mstock': ['.VIX', 'VIX'],                      'stooq': '^vix'},
+    'sox':    {'symbols': ['PHIL@SOX', 'NII@SOX', 'PHLX@SOX'], 'discover': '필라델피아',
+               'mstock': ['.SOX', 'SOX'],                      'stooq': '^sox'},
+}
+
+def fetch_stooq_index(symbol: str, key: str) -> dict:
+    """Stooq 무료 CSV 시세 (네이버에서 심볼을 못 찾은 지수용 최종 폴백 - 독립적인 별도 소스)"""
+    out = {key: {'value': None, 'change': None, 'changePct': None, 'ok': False}}
+    try:
+        url = f"https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
+        r = SESSION.get(url, timeout=8)
+        lines = r.text.strip().splitlines()
+        if len(lines) >= 2:
+            header = [h.strip() for h in lines[0].split(',')]
+            row    = [c.strip() for c in lines[1].split(',')]
+            d = dict(zip(header, row))
+            close = _mkt_num(d.get('Close'))
+            openp = _mkt_num(d.get('Open'))
+            if close is not None and close > 0:
+                chg = (close - openp) if openp else None
+                pct = (chg / openp * 100) if (chg is not None and openp) else None
+                out[key] = {'value': close, 'change': chg, 'changePct': pct, 'ok': True}
+            else:
+                _mkt_log_once(f'stooq_{key}', f"  [지수디버그] stooq {key}({symbol}) body={r.text[:300]}")
+        else:
+            _mkt_log_once(f'stooq_{key}', f"  [지수디버그] stooq {key}({symbol}) HTTP {r.status_code} body={r.text[:300]}")
+    except Exception as e:
+        _log(f"  [지수ERR] stooq {key}: {type(e).__name__}: {e}")
+    return out
+
+_world_sym_cache: dict = {}  # 검색어 -> 발견한 심볼 (or None), 프로세스당 1회만 탐색
+
+def _discover_world_symbol(search_text: str):
+    """네이버 해외증시 목록 페이지(world/)에서 심볼 코드 자동 탐색 (하드코딩 후보가 다 실패했을 때)"""
+    if search_text in _world_sym_cache:
+        return _world_sym_cache[search_text]
+    result = None
+    try:
+        url = "https://finance.naver.com/world/"
+        r = SESSION.get(url, headers={**HEADERS, "Accept": "text/html,*/*"}, timeout=8)
+        html = r.text
+        idx = html.find(search_text)
+        if idx != -1:
+            window = html[max(0, idx - 600):idx + 200]
+            m = re.search(r'symbol=([A-Za-z0-9%\.@]+)', window)
+            if m:
+                result = unquote(m.group(1))
+        if result is None:
+            _log(f"  [지수디버그] world목록 '{search_text}' 못찾음 len={len(html)} "
+                 f"snippet={_clean_snippet(html, 1500)}")
+        else:
+            _log(f"  [지수] world목록 '{search_text}' → 심볼 발견: {result}")
+    except Exception as e:
+        _log(f"  [지수ERR] world목록 '{search_text}': {type(e).__name__}: {e}")
+    _world_sym_cache[search_text] = result
+    return result
+
+def fetch_world_index(key: str, cfg: dict) -> dict:
+    """해외지수: 모바일 JSON API 우선 시도 → 실패 시 world 시세 페이지 HTML 스크래핑(심볼 후보 순차 → 자동 탐색)"""
+    out = {key: {'value': None, 'change': None, 'changePct': None, 'ok': False}}
+
+    for mcode in cfg.get('mstock', []):
+        val, chg, pct = _fetch_mstock_json(f"https://m.stock.naver.com/api/index/{mcode}/basic", f"{key}_m")
+        if val is not None:
+            out[key] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+            return out
+
+    symbols = list(cfg['symbols'])
+
+    def _try(symbol):
+        r = SESSION.get(f"https://finance.naver.com/world/sise.naver?symbol={symbol}",
+                         headers={**HEADERS, "Accept": "text/html,*/*"}, timeout=8)
+        html = r.text
+        if '존재하지 않는 종목' in html or '존재하지 않습니다' in html:
+            return None, r.status_code, html
+        val, chg, pct = _parse_generic_quote(html)
+        if val is None:
+            val_m = re.search(r'<span class="num">\s*([\d,]+\.?\d*)\s*</span>', html)
+            chg_m = re.search(r'<span class="range">\s*([\-+]?[\d,]+\.?\d*)\s*</span>', html)
+            pct_m = re.search(r'<span class="rate">\s*\(?([\-+]?[\d,]+\.?\d*)%?\)?\s*</span>', html)
+            if val_m:
+                val = _mkt_num(val_m.group(1))
+                chg = _mkt_num(chg_m.group(1)) if chg_m else chg
+                pct = _mkt_num(pct_m.group(1)) if pct_m else pct
+        return (val, chg, pct) if val is not None else None, r.status_code, html
+
+    last_html, last_status, last_sym = '', None, symbols[0]
+    for symbol in symbols:
+        try:
+            found, status, html = _try(symbol)
+            last_html, last_status, last_sym = html, status, symbol
+            if found:
+                val, chg, pct = found
+                out[key] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+                return out
+        except Exception as e:
+            _log(f"  [지수ERR] world {key}({symbol}): {type(e).__name__}: {e}")
+
+    # 하드코딩 후보 전부 실패 → 목록 페이지에서 자동 탐색해 한 번 더 시도
+    discovered = _discover_world_symbol(cfg['discover'])
+    if discovered and discovered not in symbols:
+        try:
+            found, status, html = _try(discovered)
+            last_html, last_status, last_sym = html, status, discovered
+            if found:
+                val, chg, pct = found
+                out[key] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+                return out
+        except Exception as e:
+            _log(f"  [지수ERR] world {key}({discovered}): {type(e).__name__}: {e}")
+
+    # 네이버 쪽이 전부 실패 → Stooq(독립 소스)로 최종 폴백
+    if cfg.get('stooq'):
+        stooq_out = fetch_stooq_index(cfg['stooq'], key)
+        if stooq_out[key]['ok']:
+            return stooq_out
+
+    _snip = _clean_snippet(last_html, 4000, anchor='id="content"')
+    _mkt_log_once(key, f"  [지수디버그] world {key}(마지막시도={last_sym}) HTTP {last_status} "
+                        f"len={len(last_html)} snippet={_snip}")
+    return out
+
+def fetch_market_indices() -> dict:
+    """전체 시장 지수 묶음 조회 (30초 캐시)"""
+    with _mkt_lock:
+        cached = _mkt_cache.get('data')
+        if cached and (time.time() - _mkt_cache['ts']) < MKT_TTL:
+            return cached
+
+    result = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {
+            ex.submit(fetch_domestic_index, 'KOSPI', 'kospi'):   'kospi',
+            ex.submit(fetch_domestic_index, 'KOSDAQ', 'kosdaq'): 'kosdaq',
+            ex.submit(fetch_exchange_rate):                      'fx',
+            ex.submit(fetch_btc):                                'btc',
+        }
+        for key, syms in WORLD_SYMS.items():
+            futs[ex.submit(fetch_world_index, key, syms)] = key
+
+        for fut in as_completed(futs, timeout=15):
+            try:
+                result.update(fut.result(timeout=1) or {})
+            except Exception as e:
+                _log(f"  [지수ERR] {futs.get(fut)}: {type(e).__name__}: {e}")
+
+    with _mkt_lock:
+        _mkt_cache['data'] = result
+        _mkt_cache['ts'] = time.time()
+    return result
+
+
 def search_stock_name(query: str) -> list:
     """
     종목명/코드 → 코드 조회 (시스템 프록시 사용, 빠른 fallback)
@@ -1238,6 +1596,9 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == '/api/recommend_dates':
             self._serve_json(get_recommend_dates())
+
+        elif path == '/api/market_indices':
+            self._serve_json(fetch_market_indices())
 
         elif path == '/api/reload':
             clear_cache()

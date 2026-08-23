@@ -187,6 +187,17 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .brkr-tag-pill{font-size:13px;font-weight:700;color:var(--acc);background:rgba(91,79,255,.12);border:1px solid rgba(91,79,255,.35);border-radius:20px;padding:3px 10px;cursor:pointer;white-space:nowrap}
 .brkr-tag-pill:active{background:rgba(91,79,255,.3)}
 /* 상단 증권사 바로가기 버튼 */
+/* ── 시장 지수 티커 ── */
+.mkt-ticker{display:flex;overflow-x:auto;gap:0;padding:7px 12px;background:var(--surf);border-bottom:1px solid var(--brd);scrollbar-width:none}
+.mkt-ticker::-webkit-scrollbar{display:none}
+.mkt-item{display:flex;flex-direction:column;flex-shrink:0;padding:0 14px;border-right:1px solid var(--brd2);min-width:92px}
+.mkt-item:last-child{border-right:none}
+.mkt-nm{font-size:10px;font-weight:700;color:var(--txt3);white-space:nowrap}
+.mkt-v{font-size:13px;font-weight:800;color:var(--txt);white-space:nowrap;margin-top:1px}
+.mkt-c{font-size:10px;font-weight:700;white-space:nowrap}
+.mkt-c.up{color:var(--up)} .mkt-c.dn{color:var(--dn)} .mkt-c.flat{color:var(--txt3)}
+.mkt-item.mkt-skel .mkt-v{color:var(--txt3)}
+
 .brkr-quickbar{display:flex;flex-wrap:wrap;gap:8px;padding:2px 12px 10px}
 .brkr-qbtn{flex:1;min-width:88px;text-align:center;background:var(--acc);color:#fff;font-weight:800;font-size:14px;padding:9px 8px;border-radius:10px;border:none;cursor:pointer;letter-spacing:-.2px}
 .brkr-qbtn:active{opacity:.75}
@@ -556,6 +567,8 @@ if ('serviceWorker' in navigator) {
     <button class="btn btn-a" id="btnR" onclick="start()" style="padding:5px 9px;font-size:12px"><span id="rIcon">↻</span></button>
   </div>
 </div>
+
+<div class="mkt-ticker" id="mktTicker"></div>
 
 <div class="prog"><div class="pfill" id="pf"></div></div>
 
@@ -2748,6 +2761,55 @@ function deleteMemo(){
   scheduleSync();
 }
 
+/* ══ 시장 지수 티커 (코스피/코스닥/환율/해외지수/비트코인) ══ */
+const MKT_LABELS = {
+  kospi:  '코스피',  kosdaq: '코스닥',  usdkrw: '달러환율',
+  vix:    'VIX',     nasdaq: '나스닥',  sp500:  'S&P500',
+  sox:    '필라델피아반도체', btc: '비트코인',
+};
+const MKT_ORDER = ['kospi','kosdaq','usdkrw','vix','nasdaq','sp500','sox','btc'];
+const MKT_DECIMALS = {kospi:2, kosdaq:2, usdkrw:2, vix:2, nasdaq:2, sp500:2, sox:2, btc:0};
+
+function fmtMktVal(key, v){
+  if(v==null) return '—';
+  const d = MKT_DECIMALS[key] ?? 2;
+  return v.toLocaleString('ko-KR', {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+function fmtMktChg(key, chg, pct){
+  if(chg==null && pct==null) return '';
+  const d = MKT_DECIMALS[key] ?? 2;
+  const chgS = chg!=null ? (chg>=0?'+':'')+chg.toLocaleString('ko-KR',{minimumFractionDigits:d,maximumFractionDigits:d}) : '';
+  const pctS = pct!=null ? ` (${pct>=0?'+':''}${pct.toFixed(2)}%)` : '';
+  return chgS + pctS;
+}
+
+async function loadMarketIndices(){
+  try{
+    const ctrl = new AbortController(); setTimeout(()=>ctrl.abort(), 15000);
+    const r = await apiFetch(`${SRV}/api/market_indices`, {signal: ctrl.signal});
+    if(!r.ok) return;
+    const j = await r.json();
+    renderMktTicker(j);
+  }catch(e){ /* 지수 조회 실패 시 조용히 무시 (핵심 기능 아님) */ }
+}
+
+function renderMktTicker(data){
+  const el = document.getElementById('mktTicker');
+  if(!el) return;
+  data = data || {};
+  el.innerHTML = MKT_ORDER.map(key=>{
+    const d = data[key];
+    const ok = d && d.ok && d.value!=null;
+    const chgNum = ok ? (d.change ?? null) : null;
+    const cls = rCls(chgNum);
+    return `<div class="mkt-item${ok?'':' mkt-skel'}">
+      <span class="mkt-nm">${MKT_LABELS[key]||key}</span>
+      <span class="mkt-v">${ok?fmtMktVal(key, d.value):'—'}</span>
+      <span class="mkt-c ${cls}">${ok?fmtMktChg(key, d.change, d.changePct):''}</span>
+    </div>`;
+  }).join('');
+}
+
 /* ══ 자동 새로고침 (5분마다) ══
    아이콘을 직접 눌러 갱신하지 않아도 백그라운드에서 주기적으로 주가를 갱신.
    화면이 꺼져있거나 다른 탭/앱으로 전환된 동안은 건너뛰어 배터리·데이터 절약. */
@@ -2757,6 +2819,7 @@ function startAutoRefresh(){
   _autoRefreshTimer = setInterval(() => {
     if(document.hidden) return;
     if(!busy) start();
+    loadMarketIndices();
   }, 5 * 60 * 1000);
 }
 
@@ -2783,6 +2846,7 @@ function startAutoRefresh(){
       pushPortfolio();
     });
     start();
+    loadMarketIndices();
     startAutoRefresh();
     return;
   }
@@ -2806,6 +2870,7 @@ function startAutoRefresh(){
     STOCKS=loadStocks(); BP=loadBP(); QTY=loadQty(); DT=loadDt(); MEMO=loadMemo();
     pushPortfolio();
     start();
+    loadMarketIndices();
     startAutoRefresh();
   }
 })();
