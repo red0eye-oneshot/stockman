@@ -14,7 +14,7 @@
 """
 
 import os, sys, re, json, time, calendar, threading, socket, webbrowser, io
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote, quote
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -93,10 +93,38 @@ SESSION.mount('http://', _adapter)
 _cache      = {}          # code -> {'data': dict, 'ts': float}
 _cache_lock = threading.Lock()
 
+# ── 공유 스레드풀 (요청마다 새로 만들지 않음) ─────────────────
+# 주의: `with ThreadPoolExecutor(...) as ex:` 패턴은 블록을 빠져나갈 때
+# ex.shutdown(wait=True)를 호출해서, 개별 future.result(timeout=N)이
+# 타임아웃으로 "포기"한 뒤에도 실제로는 그 느린 작업이 끝날 때까지
+# 함수 전체가 계속 블록되는 문제가 있었음(pykrx가 사내망에서 응답 없이
+# 멈추는 경우 특히 치명적). 공유 풀을 쓰면 느린 작업은 백그라운드에서
+# 계속 돌게 두고, 요청 처리는 제때 반환된다.
+_shared_pool = ThreadPoolExecutor(max_workers=40)
+
+# ── 브라우저 탭 닫으면 자동 종료 (로컬 PC 모드 전용) ──────────────
+# 클라이언트가 탭을 열어두는 동안 주기적으로 /api/heartbeat 를 호출해서
+# _last_heartbeat 를 갱신함. 일정 시간(HEARTBEAT_GRACE) 동안 신호가 없으면
+# "탭이 닫혔다"고 보고 파이썬 프로세스를 스스로 종료함.
+# 새로고침(F5) 정도의 짧은 공백은 grace 시간 안에 새 heartbeat가 다시 들어오므로
+# 서버가 꺼지지 않음 — 진짜로 탭을 닫고 한동안 안 열었을 때만 종료됨.
+_last_heartbeat = time.time()
+HEARTBEAT_GRACE = 90   # 이 시간(초) 동안 heartbeat가 없으면 종료
+                       # (브라우저가 백그라운드 탭의 setInterval을 느리게 만드는 경우까지 감안한 여유)
+
+def _heartbeat_watchdog():
+    while True:
+        time.sleep(10)
+        idle = time.time() - _last_heartbeat
+        if idle > HEARTBEAT_GRACE:
+            print(f"\n  브라우저 탭이 닫힌 것으로 감지됨 ({idle:.0f}초간 응답 없음) → 서버 종료")
+            os._exit(0)
+
 # ── KRX 실패 이력 ───────────────────────────────────────
 _krx_failed = set()
 _inv_debug: dict = {}   # 수급 디버그 로그
 PYKRX_INV_DEAD = True   # pykrx 투자자 API hang 방지 → naver HTML 직접 사용
+PYKRX_CANDLES_DEAD = True   # pykrx 일봉(캔들) API도 같은 사유로 hang → 네이버 fchart 직접 사용 (속도 개선)
 
 # ── 컨센서스 캐시 (1시간) ─────────────────────────────────
 _cs_cache: dict = {}    # code -> {'data': dict, 'ts': float}
@@ -186,8 +214,10 @@ def fetch_candles_naver(code: str) -> list:
 
 
 def fetch_candles(code: str) -> list:
-    """pykrx → 네이버 fchart 순서로 일봉 조회. 둘 다 실패하면 [] 반환"""
-    if PYKRX:
+    """네이버 fchart(기본) → pykrx(PYKRX_CANDLES_DEAD=False일 때만 보조) 순서로 일봉 조회.
+       pykrx는 사내망/프록시 환경에서 응답 없이 멈추는 사례가 있어 기본적으로 건너뜀
+       (투자자 수급·재무 데이터와 동일한 이유로 이미 비활성화된 것과 같은 조치)."""
+    if PYKRX and not PYKRX_CANDLES_DEAD:
         c = fetch_candles_pykrx(code)
         if c:
             return c
@@ -195,6 +225,9 @@ def fetch_candles(code: str) -> list:
         return fetch_candles_naver(code)
     except Exception as e:
         _log(f"[WARN] fetch_candles_naver({code}) 실패: {e}")
+        if PYKRX and PYKRX_CANDLES_DEAD:
+            # naver도 실패하면 마지막 수단으로 pykrx 한 번 시도
+            return fetch_candles_pykrx(code)
         return []
 
 
@@ -951,10 +984,39 @@ WORLD_SYMS = {
     'sp500':  {'symbols': ['SPI@SPX'],                         'discover': 'S&amp;P500',
                'mstock': ['.INX', '.SPX', 'SPX']},
     'vix':    {'symbols': ['CBO@VIX', 'CBOE@VIX'],             'discover': 'VIX',
-               'mstock': ['.VIX', 'VIX'],                      'stooq': '^vix'},
-    'sox':    {'symbols': ['PHIL@SOX', 'NII@SOX', 'PHLX@SOX'], 'discover': '필라델피아',
-               'mstock': ['.SOX', 'SOX'],                      'stooq': '^sox'},
+               'mstock': ['.VIX', 'VIX'],                      'stooq': '^vix',
+               'tradingview': 'CBOE:VIX'},
 }
+
+def fetch_tradingview_index(symbol: str, key: str) -> dict:
+    """TradingView 스캐너 API (네이버·Stooq 다 실패한 지수용 최종 폴백)
+       symbol 예: 'CBOE:VIX' (거래소:심볼 형식)"""
+    out = {key: {'value': None, 'change': None, 'changePct': None, 'ok': False}}
+    try:
+        url = "https://scanner.tradingview.com/america/scan"
+        payload = {
+            "symbols": {"tickers": [symbol], "query": {"types": []}},
+            "columns": ["close", "change", "change_abs"],
+        }
+        r = SESSION.post(url, json=payload,
+                          headers={**HEADERS, "Content-Type": "application/json", "Accept": "application/json"},
+                          timeout=8)
+        if r.status_code == 200:
+            j = r.json()
+            data = j.get('data') or []
+            d = (data[0].get('d') if data else None) or []
+            close = _mkt_num(d[0]) if len(d) > 0 else None
+            pct   = _mkt_num(d[1]) if len(d) > 1 else None
+            chg   = _mkt_num(d[2]) if len(d) > 2 else None
+            if close is not None:
+                out[key] = {'value': close, 'change': chg, 'changePct': pct, 'ok': True}
+            else:
+                _mkt_log_once(f'tv_{key}', f"  [지수디버그] tradingview {key}({symbol}) raw={str(j)[:500]}")
+        else:
+            _mkt_log_once(f'tv_{key}', f"  [지수디버그] tradingview {key}({symbol}) HTTP {r.status_code} body={r.text[:400]}")
+    except Exception as e:
+        _log(f"  [지수ERR] tradingview {key}: {type(e).__name__}: {e}")
+    return out
 
 def fetch_stooq_index(symbol: str, key: str) -> dict:
     """Stooq 무료 CSV 시세 (네이버에서 심볼을 못 찾은 지수용 최종 폴백 - 독립적인 별도 소스)"""
@@ -1062,11 +1124,17 @@ def fetch_world_index(key: str, cfg: dict) -> dict:
         except Exception as e:
             _log(f"  [지수ERR] world {key}({discovered}): {type(e).__name__}: {e}")
 
-    # 네이버 쪽이 전부 실패 → Stooq(독립 소스)로 최종 폴백
+    # 네이버 쪽이 전부 실패 → Stooq(독립 소스)로 시도
     if cfg.get('stooq'):
         stooq_out = fetch_stooq_index(cfg['stooq'], key)
         if stooq_out[key]['ok']:
             return stooq_out
+
+    # Stooq도 실패 → TradingView 스캐너 API로 최종 폴백
+    if cfg.get('tradingview'):
+        tv_out = fetch_tradingview_index(cfg['tradingview'], key)
+        if tv_out[key]['ok']:
+            return tv_out
 
     _snip = _clean_snippet(last_html, 4000, anchor='id="content"')
     _mkt_log_once(key, f"  [지수디버그] world {key}(마지막시도={last_sym}) HTTP {last_status} "
@@ -1081,21 +1149,24 @@ def fetch_market_indices() -> dict:
             return cached
 
     result = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futs = {
-            ex.submit(fetch_domestic_index, 'KOSPI', 'kospi'):   'kospi',
-            ex.submit(fetch_domestic_index, 'KOSDAQ', 'kosdaq'): 'kosdaq',
-            ex.submit(fetch_exchange_rate):                      'fx',
-            ex.submit(fetch_btc):                                'btc',
-        }
-        for key, syms in WORLD_SYMS.items():
-            futs[ex.submit(fetch_world_index, key, syms)] = key
+    ex = _shared_pool  # 공유 풀 사용 (per-call 풀 생성 시 shutdown(wait=True)로 블록되는 문제 방지)
+    futs = {
+        ex.submit(fetch_domestic_index, 'KOSPI', 'kospi'):   'kospi',
+        ex.submit(fetch_domestic_index, 'KOSDAQ', 'kosdaq'): 'kosdaq',
+        ex.submit(fetch_exchange_rate):                      'fx',
+        ex.submit(fetch_btc):                                'btc',
+    }
+    for key, syms in WORLD_SYMS.items():
+        futs[ex.submit(fetch_world_index, key, syms)] = key
 
+    try:
         for fut in as_completed(futs, timeout=15):
             try:
                 result.update(fut.result(timeout=1) or {})
             except Exception as e:
                 _log(f"  [지수ERR] {futs.get(fut)}: {type(e).__name__}: {e}")
+    except FutureTimeoutError:
+        _log("  [지수ERR] market_indices 전체 15초 타임아웃 - 완료된 것만 반영")
 
     with _mkt_lock:
         _mkt_cache['data'] = result
@@ -1265,35 +1336,41 @@ def get_stock_data(code: str) -> dict:
     print(f"  조회: {code}", end="", flush=True)
     try:
         # ── 5개 fetch를 동시에 병렬 실행 (컨센서스 목표가 포함) ────
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            f_candles = ex.submit(fetch_candles, code)
-            f_price   = ex.submit(fetch_price_naver, code)
-            f_inv     = ex.submit(fetch_investor_data, code)
-            f_fin     = ex.submit(fetch_financial_summary, code)
-            f_cons    = ex.submit(fetch_consensus_data, code)
+        # 공유 스레드풀 사용: 느린 작업이 있어도 그 작업 때문에 이 요청 전체가
+        # 붙잡히지 않음 (개별 result(timeout=N)만큼만 기다리고 반환).
+        ex = _shared_pool
+        f_candles = ex.submit(fetch_candles, code)
+        f_price   = ex.submit(fetch_price_naver, code)
+        f_inv     = ex.submit(fetch_investor_data, code)
+        f_fin     = ex.submit(fetch_financial_summary, code)
+        f_cons    = ex.submit(fetch_consensus_data, code)
 
-            candles  = f_candles.result(timeout=30)
-            try:
-                nv_px, nv_prev, nv_name = f_price.result(timeout=20)
-            except Exception:
-                nv_px, nv_prev, nv_name = None, None, ''
-            try:
-                inv_data = f_inv.result(timeout=30)
-            except Exception:
-                inv_data = {'frgnRatio': None, 'investors': {}, 'invDaily': [], 'indivDaily': [], 'name': ''}
-            try:
-                fin_data = f_fin.result(timeout=30)
-            except Exception:
-                fin_data = {'eps': None, 'per': None}
-            try:
-                cons_data = f_cons.result(timeout=20)
-            except Exception:
-                cons_data = {
-                    'opinionScore': None, 'targetPrice': None,
-                    'consensusEps': None, 'consensusPer': None,
-                    'institutionCount': None, 'baseDate': None,
-                    'consensusAvgTarget': None, 'consensus': [],
-                }
+        try:
+            candles = f_candles.result(timeout=12)
+        except Exception as e:
+            _log(f"  [캔들 타임아웃] {code}: {type(e).__name__}")
+            candles = []
+        try:
+            nv_px, nv_prev, nv_name = f_price.result(timeout=12)
+        except Exception:
+            nv_px, nv_prev, nv_name = None, None, ''
+        try:
+            inv_data = f_inv.result(timeout=12)
+        except Exception:
+            inv_data = {'frgnRatio': None, 'investors': {}, 'invDaily': [], 'indivDaily': [], 'name': ''}
+        try:
+            fin_data = f_fin.result(timeout=12)
+        except Exception:
+            fin_data = {'eps': None, 'per': None}
+        try:
+            cons_data = f_cons.result(timeout=12)
+        except Exception:
+            cons_data = {
+                'opinionScore': None, 'targetPrice': None,
+                'consensusEps': None, 'consensusPer': None,
+                'institutionCount': None, 'baseDate': None,
+                'consensusAvgTarget': None, 'consensus': [],
+            }
 
         today_str = datetime.now().strftime('%Y-%m-%d')
 
@@ -1550,7 +1627,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split('?')[0].rstrip('/')
 
         public_paths = ('', '/index.html', '/stock_tracker.html',
-                        '/manifest.json', '/sw.js', '/api/ping')
+                        '/manifest.json', '/sw.js', '/api/ping', '/api/heartbeat')
 
         if path not in public_paths and not self._check_auth():
             self.send_error(401, 'Unauthorized - invalid or missing API key')
@@ -1583,6 +1660,13 @@ class Handler(BaseHTTPRequestHandler):
                 'time':  datetime.now().strftime('%H:%M:%S'),
                 'market': is_market_open(),
             })
+
+        elif path == '/api/heartbeat':
+            # PC 브라우저 탭이 열려있는 동안 주기적으로 호출 → 마지막 신호 시각 갱신.
+            # (로컬 모드에서만 의미 있음. 클라우드에선 자동 종료 감시 스레드 자체가 안 돎)
+            global _last_heartbeat
+            _last_heartbeat = time.time()
+            self._serve_json({'ok': True})
 
         elif path == '/api/portfolio':
             self._serve_json(load_portfolio())
@@ -1750,10 +1834,17 @@ def main():
     print(f"   데이터 소스:  {'pykrx + 네이버' if PYKRX else '네이버 fchart'}")
     print(f"   캐시 TTL:     장중 {CACHE_TTL}초 / 장외 {CACHE_TTL_OFF}초")
     print(f"   장중 여부:    {'장중' if is_market_open() else '장외'}")
+    if not is_cloud:
+        print(f"   자동 종료:    브라우저 탭을 닫고 {HEARTBEAT_GRACE}초 지나면 서버 자동 종료")
     print()
     print("   종료: Ctrl+C")
     print("=" * 55)
     print()
+
+    if not is_cloud:
+        global _last_heartbeat
+        _last_heartbeat = time.time()   # 서버 막 시작한 시점부터 grace 시작
+        threading.Thread(target=_heartbeat_watchdog, daemon=True).start()
 
     srv = ThreadedServer(('', PORT), Handler)
 

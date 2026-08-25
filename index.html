@@ -192,9 +192,9 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .mkt-ticker::-webkit-scrollbar{display:none}
 .mkt-item{display:flex;flex-direction:column;flex-shrink:0;padding:0 14px;border-right:1px solid var(--brd2);min-width:92px}
 .mkt-item:last-child{border-right:none}
-.mkt-nm{font-size:10px;font-weight:700;color:var(--txt3);white-space:nowrap}
-.mkt-v{font-size:13px;font-weight:800;color:var(--txt);white-space:nowrap;margin-top:1px}
-.mkt-c{font-size:10px;font-weight:700;white-space:nowrap}
+.mkt-nm{font-size:14px;font-weight:700;color:var(--txt3);white-space:nowrap}
+.mkt-v{font-size:18px;font-weight:800;color:var(--txt);white-space:nowrap;margin-top:1px}
+.mkt-c{font-size:14px;font-weight:700;white-space:nowrap}
 .mkt-c.up{color:var(--up)} .mkt-c.dn{color:var(--dn)} .mkt-c.flat{color:var(--txt3)}
 .mkt-item.mkt-skel .mkt-v{color:var(--txt3)}
 
@@ -244,14 +244,17 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 
 /* ── 외국인·기관·개인 순매매 테이블 (한 화면, 칸 간격 압축) ── */
 .inv-section{padding:4px 10px 7px;border-top:1px solid var(--brd2)}
-.inv-tbl{width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed}
-.inv-tbl th{font-size:10px;color:var(--gold);font-weight:700;padding:2px 3px;text-align:center;border-bottom:1px solid var(--brd2);white-space:nowrap}
-.inv-tbl td{padding:2px 3px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
-.inv-tbl td:first-child{text-align:left;color:var(--txt2);font-weight:500;font-size:10px}
+.inv-tbl{width:100%;border-collapse:collapse;font-size:18px;table-layout:fixed}
+.inv-tbl th{font-size:16px;color:var(--gold);font-weight:700;padding:3px 3px;text-align:center;border-bottom:1px solid var(--brd2);white-space:nowrap}
+.inv-tbl td{padding:3px 3px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.inv-tbl td:first-child{text-align:left;color:var(--txt2);font-weight:500;font-size:16px}
 .inv-tbl tr:hover td{background:var(--surf2)}
 .inv-tbl .c-hold{color:var(--txt);font-weight:500}
-.inv-tbl-compact th,.inv-tbl-compact td{padding:1px 2px;font-size:9.5px}
-.inv-tbl-compact td:first-child{font-size:9px}
+.inv-tbl-compact th,.inv-tbl-compact td{padding:2px 2px;font-size:15px}
+.inv-tbl-compact td:first-child{font-size:14px}
+.inv-cum{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;padding:2px 0 6px;font-size:14px;font-weight:700}
+.inv-cum-lbl{color:var(--txt3);font-size:12px;font-weight:700;white-space:nowrap}
+.inv-cum-item{color:var(--txt2);white-space:nowrap}
 /* 매매 수급 색상: + 빨강 / - 파랑 / 0 회색 */
 .c-up{color:var(--up)}
 .c-dn{color:var(--dn)}
@@ -827,18 +830,21 @@ async function loadRecommendDates() {
         // 클라우드엔 엑셀 파일이 없으므로, 폰이 앱을 열 때 최신 추천주 날짜를 받으려면
         // PC가 대신 파싱해서 클라우드로 올려줘야 함 (포트폴리오 동기화와 동일한 방식).
         if (SRV === '') {
-          try {
-            // Render 무료 서버는 잠들어 있으면 깨어나는 데 최대 60초 가까이 걸릴 수 있어
-            // 타임아웃을 넉넉히 잡음 (너무 짧으면 push가 중간에 끊겨 폰에 반영이 안 됨)
-            const ctrl = new AbortController(); const tid = setTimeout(()=>ctrl.abort(), 60000);
-            await apiFetch(`${CLOUD_SRV}/api/recommend_dates`, {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify(srv),
-              signal: ctrl.signal
-            });
-            clearTimeout(tid);
-          } catch(e) { /* 클라우드 미연결 → 무시 */ }
+          // Render 무료 서버는 잠들어 있으면 깨어나는 데 최대 60초 가까이 걸릴 수 있음.
+          // 이 push는 백그라운드에서 실행 (await 하지 않음) — 종목 가격 로딩이
+          // 클라우드 깨우는 시간 때문에 멈춰있으면 안 되므로, 여기서 막지 않고 흘려보냄.
+          (async () => {
+            try {
+              const ctrl = new AbortController(); const tid = setTimeout(()=>ctrl.abort(), 60000);
+              await apiFetch(`${CLOUD_SRV}/api/recommend_dates`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(srv),
+                signal: ctrl.signal
+              });
+              clearTimeout(tid);
+            } catch(e) { /* 클라우드 미연결 → 무시 */ }
+          })();
         }
       }
     }
@@ -1057,8 +1063,31 @@ function buildInvTabHtml(daily, indivDaily){
     <td class="flat">${r.frgnRate!=null ? r.frgnRate.toFixed(2)+'%' : '—'}</td>
   </tr>`;
   }).join('');
+
+  /* 기관/개인은 "총 보유량"이 공시되는 통계가 아니라서(외국인만 매일 공시됨),
+     표시된 기간 동안의 순매수 누적을 발행주식수 대비 비율로 환산해서 대신 보여줌.
+     발행주식수는 외국인 보유주수÷외국인 보유율로 역산. */
+  let totalShares = null;
+  for (const r of daily) {
+    if (r.frgnHold != null && r.frgnRate != null && r.frgnRate > 0) {
+      totalShares = r.frgnHold / (r.frgnRate / 100);
+      break;
+    }
+  }
+  const organSum = daily.reduce((s,r)=>s+(r.organ||0), 0);
+  const indivSum = indivDaily.reduce((s,r)=>s+(r.indiv||0), 0);
+  const organPct = totalShares ? (organSum/totalShares*100) : null;
+  const indivPct = totalShares ? (indivSum/totalShares*100) : null;
+  const pctStr = p => p!=null ? ` (${p>=0?'+':''}${p.toFixed(2)}%)` : '';
+  const cumLine = `<div class="inv-cum">
+    <span class="inv-cum-lbl">최근 ${daily.length}일 누적</span>
+    <span class="inv-cum-item">기관 ${_fmtInvN(organSum)}주${pctStr(organPct)}</span>
+    <span class="inv-cum-item">개인 ${_fmtInvN(indivSum)}주${pctStr(indivPct)}</span>
+  </div>`;
+
   return `<div class="inv-section">
     ${isEst?'<div class="flat" style="font-size:9px;padding:0 0 3px">※ 개인 = -(기관+외국인) 추정치</div>':''}
+    ${cumLine}
     <table class="inv-tbl inv-tbl-compact">
       <thead><tr><th>날짜</th><th>기관</th><th>외국인</th><th>개인${isEst?'*':''}</th><th>보유주수</th><th>보유율</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -1317,9 +1346,10 @@ async function start() {
   document.getElementById('sub').textContent='데이터 가져오는 중...';
   render();
   QTY=loadQty();
-  const B=10;
-  for(let i=0;i<STOCKS.length;i+=B)
-    await Promise.all(STOCKS.slice(i,i+B).map(loadOne));
+  // 인위적으로 10개씩 나눠 순차 대기하지 않고 한 번에 다 요청.
+  // 브라우저가 origin당 동시 연결 수(보통 6개)를 알아서 관리하므로,
+  // 배치 하나에 낀 느린 종목 하나 때문에 다음 배치 전체가 미뤄지는 일이 없어짐.
+  await Promise.allSettled(STOCKS.map(loadOne));
   busy=false;
   document.getElementById('btnR').disabled=false;
   document.getElementById('rIcon').textContent='↻';
@@ -2765,10 +2795,10 @@ function deleteMemo(){
 const MKT_LABELS = {
   kospi:  '코스피',  kosdaq: '코스닥',  usdkrw: '달러환율',
   vix:    'VIX',     nasdaq: '나스닥',  sp500:  'S&P500',
-  sox:    '필라델피아반도체', btc: '비트코인',
+  btc: '비트코인',
 };
-const MKT_ORDER = ['kospi','kosdaq','usdkrw','vix','nasdaq','sp500','sox','btc'];
-const MKT_DECIMALS = {kospi:2, kosdaq:2, usdkrw:2, vix:2, nasdaq:2, sp500:2, sox:2, btc:0};
+const MKT_ORDER = ['kospi','kosdaq','usdkrw','vix','nasdaq','sp500','btc'];
+const MKT_DECIMALS = {kospi:2, kosdaq:2, usdkrw:2, vix:2, nasdaq:2, sp500:2, btc:0};
 
 function fmtMktVal(key, v){
   if(v==null) return '—';
@@ -2810,6 +2840,23 @@ function renderMktTicker(data){
   }).join('');
 }
 
+/* ══ 하트비트 (로컬 PC 서버 자동 종료용) ══
+   탭이 열려있는 동안 15초마다 로컬 서버에 신호를 보냄. 탭을 닫으면(또는 새로고침 중 잠깐
+   끊겨도) 신호가 끊기는데, 서버는 60초 넘게 신호가 없을 때만 스스로 종료하므로
+   새로고침 정도로는 서버가 안 꺼짐 — 진짜로 탭을 닫아둔 채 방치할 때만 종료됨.
+   클라우드(폰) 모드에서는 의미 없으므로 보내지 않음. */
+let _hbTimer = null;
+function sendHeartbeat(){
+  if(SRV !== '') return; // 로컬 모드에서만
+  fetch('/api/heartbeat').catch(()=>{});
+}
+function startHeartbeat(){
+  if(SRV !== '') return;
+  if(_hbTimer) clearInterval(_hbTimer);
+  sendHeartbeat();
+  _hbTimer = setInterval(sendHeartbeat, 15000);
+}
+
 /* ══ 자동 새로고침 (5분마다) ══
    아이콘을 직접 눌러 갱신하지 않아도 백그라운드에서 주기적으로 주가를 갱신.
    화면이 꺼져있거나 다른 탭/앱으로 전환된 동안은 건너뛰어 배터리·데이터 절약. */
@@ -2848,6 +2895,7 @@ function startAutoRefresh(){
     start();
     loadMarketIndices();
     startAutoRefresh();
+    startHeartbeat();
     return;
   }
 
@@ -2872,6 +2920,7 @@ function startAutoRefresh(){
     start();
     loadMarketIndices();
     startAutoRefresh();
+    startHeartbeat();
   }
 })();
 </script>
