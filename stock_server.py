@@ -1491,10 +1491,10 @@ def load_portfolio() -> dict:
             with open(PORTFOLIO_PATH, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except FileNotFoundError:
-        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}}
+        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}, 'sell': {}}
     except Exception as e:
         _log(f'portfolio load error: {e}')
-        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}}
+        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}, 'sell': {}}
 
 def save_portfolio(data: dict):
     """portfolio.json 저장."""
@@ -1758,6 +1758,8 @@ class Handler(BaseHTTPRequestHandler):
                         data[key] = []  if key == 'stocks' else {}
                 if 'memo' not in data:
                     data['memo'] = {}
+                if 'sell' not in data:
+                    data['sell'] = {}
                 save_portfolio(data)
                 self._serve_json({'ok': True, 'saved': True})
             except Exception as e:

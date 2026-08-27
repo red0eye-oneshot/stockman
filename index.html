@@ -316,6 +316,18 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,'Apple SD G
 .memo-card-btn{background:var(--gold);color:#000;border:none;border-radius:50%;width:26px;height:26px;font-size:11px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s}
 .memo-card-btn:active{opacity:.6}
 .memo-card-btn.has-memo{box-shadow:0 0 7px rgba(255,204,68,.7)}
+.sell-card-btn{background:var(--surf2);color:var(--txt2);border:1.5px solid var(--brd2);border-radius:50%;width:26px;height:26px;font-size:11px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s}
+.sell-card-btn:active{opacity:.6}
+.sell-card-btn.has-sell{background:var(--dn);color:#fff;border-color:var(--dn);box-shadow:0 0 7px rgba(51,119,255,.65)}
+.sell-add-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.sell-list{display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto}
+.sell-item{display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--brd2);border-radius:8px;padding:7px 10px;font-size:12px}
+.sell-item-date{color:var(--gold);font-weight:700;min-width:64px;white-space:nowrap}
+.sell-item-qty{color:var(--txt2);white-space:nowrap}
+.sell-item-px{color:var(--txt);flex:1;text-align:right;white-space:nowrap}
+.sell-item-amt{color:var(--dn);font-weight:700;min-width:82px;text-align:right;white-space:nowrap}
+.sell-item-del{background:rgba(255,51,85,.12);border:none;color:var(--up);border-radius:6px;font-size:11px;font-weight:700;padding:4px 8px;cursor:pointer;flex-shrink:0}
+.sell-summary{font-size:12px;color:var(--txt2);text-align:right;padding-top:2px}
 .memo-display{display:flex;flex-direction:column;gap:3px;margin-top:5px;width:100%}
 .memo-disp-row{display:flex;align-items:center;gap:3px;padding:2px 5px;border-radius:5px}
 .memo-disp-row.tgt{background:rgba(0,199,122,.08);border:1px solid rgba(0,199,122,.3)}
@@ -745,6 +757,42 @@ if ('serviceWorker' in navigator) {
   </div>
 </div>
 
+<!-- 매도 관리 모달 -->
+<div class="memo-mbg" id="sellModal" onclick="sellModalBgTap(event)">
+  <div class="memo-sheet">
+    <div class="mhandle"></div>
+    <div class="memo-hdr">
+      <div style="flex:1">
+        <div class="memo-htitle" id="sellTitle">💰 매도 관리</div>
+        <div class="memo-hcode" id="sellCode"></div>
+      </div>
+      <button class="btnx" onclick="closeSell()">✕</button>
+    </div>
+    <div class="memo-body">
+      <div class="memo-sec">
+        <span class="memo-lbl">➕ 매도 기록 추가</span>
+        <div class="sell-add-row">
+          <input class="bi bi-date" type="date" id="sellDate" style="flex:1;min-width:110px">
+          <input class="bi bi-q" type="number" id="sellQty" placeholder="수량" min="0" inputmode="numeric" style="width:64px">
+          <input class="bi" type="text" id="sellPrice" placeholder="매도가" inputmode="numeric"
+            onfocus="this.value=this.value.replace(/,/g,'')"
+            onblur="if(this.value){const v=parseInt(this.value.replace(/,/g,''))||0;this.value=v?v.toLocaleString('ko-KR'):'';}"
+            style="flex:1;min-width:80px">
+        </div>
+        <button class="memo-save" style="width:100%;margin-top:6px" onclick="addSellRecord()">매도 기록 추가</button>
+      </div>
+      <div class="memo-sec">
+        <span class="memo-lbl">📋 매도 이력</span>
+        <div class="sell-list" id="sellList"></div>
+        <div class="sell-summary" id="sellSummary"></div>
+      </div>
+    </div>
+    <div class="memo-foot">
+      <button class="memo-cancel" style="margin-left:auto" onclick="closeSell()">닫기</button>
+    </div>
+  </div>
+</div>
+
 <!-- 오늘수익/손해 팝업 -->
 <div class="tpop-bg" id="todayPop" onclick="hideTodayPop(event)">
   <div class="tpop-sheet">
@@ -857,6 +905,7 @@ async function loadRecommendDates() {
 /* ══ 스토리지 키 ══ */
 const KS='srk_s3',KB='srk_b3',KQ='srk_q3',KD='srk_d3',KSRV='srk_srv',KKEY='srk_apikey',KH='srk_hist_v1',KM='srk_memo_v1';
 const KW='srk_watch_v1';
+const KSL='srk_sell_v1'; // 종목별 매도 기록: {code:[{id,date,qty,price},...]}
 const KDEL='srk_deleted_v1'; // 사용자가 삭제한 기본(DFLT) 종목 코드 — 재로드 시 되살아나지 않도록 기억
 const loadDeleted=()=>{try{return new Set(JSON.parse(localStorage.getItem(KDEL)||'[]'));}catch{return new Set();}};
 const saveDeleted=set=>localStorage.setItem(KDEL,JSON.stringify([...set]));
@@ -889,9 +938,11 @@ const loadDt  = () => {try{return JSON.parse(localStorage.getItem(KD)||'{}');}ca
 const saveDt  = (c,v) => {const m=loadDt();v?m[c]=v:delete m[c];localStorage.setItem(KD,JSON.stringify(m));};
 const loadMemo= () => {try{return JSON.parse(localStorage.getItem(KM)||'{}');}catch{return {};}};
 const saveMemo= (c,k,v) => {const m=loadMemo();if(!m[c])m[c]={};if(v)m[c][k]=v;else delete m[c][k];if(!Object.keys(m[c]).length)delete m[c];localStorage.setItem(KM,JSON.stringify(m));};
+const loadSell= () => {try{return JSON.parse(localStorage.getItem(KSL)||'{}');}catch{return {};}};
+const saveSell= (c,arr) => {const m=loadSell();if(arr&&arr.length)m[c]=arr;else delete m[c];localStorage.setItem(KSL,JSON.stringify(m));scheduleSync();};
 
 /* ══ 상태 ══ */
-let STOCKS = loadStocks(), BP = loadBP(), QTY = loadQty(), DT = loadDt(), MEMO = loadMemo();
+let STOCKS = loadStocks(), BP = loadBP(), QTY = loadQty(), DT = loadDt(), MEMO = loadMemo(), SELL = loadSell();
 let WATCH=loadWatch();
 const WD={};
 const D = {};
@@ -922,6 +973,7 @@ async function pushPortfolio() {
     qty: loadQty(),
     dt: loadDt(),
     memo: loadMemo(),
+    sell: loadSell(),
     hist: _hist,
     del: [...loadDeleted()],  // 삭제한 기본(DFLT) 종목 코드 — 다른 기기에서도 되살아나지 않게 함께 동기화
     ts: Date.now()
@@ -997,6 +1049,7 @@ async function pullPortfolio() {
       const def = {}; data.stocks.forEach(s=>{ if(s.defDt)  def[s.code]=s.defDt;  }); if(Object.keys(def).length) localStorage.setItem(KD, JSON.stringify(def));
     }
     if (data.memo && Object.keys(data.memo).length) localStorage.setItem(KM, JSON.stringify(data.memo));
+    if (data.sell && Object.keys(data.sell).length) localStorage.setItem(KSL, JSON.stringify(data.sell));
     // 서버 hist와 로컬 hist 병합 (날짜 기준 최신 우선, 최대 365일)
     if (Array.isArray(data.hist) && data.hist.length > 0) {
       let localHist=[];
@@ -1010,7 +1063,7 @@ async function pullPortfolio() {
       localStorage.setItem(KH,JSON.stringify(combined));
     }
     // 메모리 상태 갱신
-    STOCKS = loadStocks(); BP = loadBP(); QTY = loadQty(); DT = loadDt(); MEMO = loadMemo();
+    STOCKS = loadStocks(); BP = loadBP(); QTY = loadQty(); DT = loadDt(); MEMO = loadMemo(); SELL = loadSell();
     return true;
   } catch(e) { return false; }
 }
@@ -1536,11 +1589,14 @@ function cardOf(d) {
   /* 메모 */
   const memo=MEMO[d.code]||{};
   const hasMemo=!!(memo.target||memo.stop||memo.note);
+  const sellRecs=SELL[d.code]||[];
+  const hasSell=sellRecs.length>0;
   const hdr=`<div class="card-hdr">
     <span class="c-name"><a href="https://finance.naver.com/item/main.naver?code=${d.realCode||d.code}" target="_blank" rel="noopener">${d.name}</a></span>
     ${isETF(d.realCode||d.code)?'<span class="c-badge">ETF</span>':''}
     ${d.px!=null?`<span class="c-hold ${rCls(chgR)}">${fmt(d.px)}원 ${fmtR(chgR)}${todayW!=null?` (${fmtPW(todayW)})`:''}</span>`:''}
     <span class="c-code">${d.realCode||d.code}${d.frgnRatio!=null?` · ${d.frgnRatio.toFixed(1)}%`:''}</span>
+    <button class="sell-card-btn${hasSell?' has-sell':''}" onclick="event.stopPropagation();openSell('${d.code}')" title="매도 관리">💰</button>
     <button class="memo-card-btn${hasMemo?' has-memo':''}" onclick="event.stopPropagation();openMemo('${d.code}')" title="메모">📝</button>
   </div>`;
   /* P&L 테이블 */
@@ -1894,7 +1950,7 @@ function brkrHdr(nm,st){
 function render() {
   const ae=document.activeElement;
   if(ae?.classList.contains('bi')||ae?.classList.contains('bi-date')||ae?.classList.contains('memo-price-inp'))return;
-  BP=loadBP(); MEMO=loadMemo();
+  BP=loadBP(); MEMO=loadMemo(); SELL=loadSell();
   renderBrkrQuickbar();
   if(!Object.keys(D).length){
     document.getElementById('list').innerHTML='<div class="brkr-section"><div class="brkr-cards">'+STOCKS.slice(0,6).map(skCard).join('')+'</div></div>'; return;
@@ -2629,6 +2685,62 @@ async function exportExcel() {
     ws3['!rows']=[{hpt:22}];
     XLSX.utils.book_append_sheet(wb,ws3,'종목이력');
 
+    /* ── 시트4: 거래현황 (매수·매도 내역) ── */
+    const SELL4=loadSell();
+    const h4=['날짜','구분','증권사','종목명','종목코드','수량','단가','금액','비고'];
+    const txRows=[];
+    STOCKS.forEach(s=>{
+      const bp=BP[s.code],qty=QTY[s.code],dt=DT[s.code]||s.defDt||'';
+      if(bp&&qty&&dt){
+        txRows.push({date:dt,type:'매수',brkr:s.brkr||'',name:s.name,code:s.realCode||s.code,qty,price:bp,amt:bp*qty,note:'현재 보유 매수단가 기준'});
+      }
+      (SELL4[s.code]||[]).forEach(r=>{
+        const note=bp?`실현손익(대략) ${(r.price-bp)*r.qty>=0?'+':''}${Math.round((r.price-bp)*r.qty).toLocaleString('ko-KR')}원`:'';
+        txRows.push({date:r.date,type:'매도',brkr:s.brkr||'',name:s.name,code:s.realCode||s.code,qty:r.qty,price:r.price,amt:r.qty*r.price,note});
+      });
+    });
+    txRows.sort((a,b)=> a.date===b.date ? (a.type===b.type?0:(a.type==='매수'?-1:1)) : b.date.localeCompare(a.date));
+    let totBuy4=0, totSell4=0;
+    txRows.forEach(t=>{ if(t.type==='매수') totBuy4+=t.amt; else totSell4+=t.amt; });
+
+    const r4=[h4.map(hC)];
+    r4.push([
+      {v:'★ 거래 합계',t:'s',s:ms({bold:true,color:C_WHITE,bg:BG_TOTAL,align:'left',sz:12})},
+      {v:'매수',t:'s',s:ms({bold:true,color:C_UP,bg:BG_TOTAL,align:'center'})},
+      ...Array(4).fill(null).map(()=>({v:'',t:'s',s:ms({bg:BG_TOTAL})})),
+      {v:'',t:'s',s:ms({bg:BG_TOTAL})},
+      {v:Math.round(totBuy4),t:'n',z:'#,##0',s:ms({bold:true,color:C_WHITE,bg:BG_TOTAL,sz:12})},
+      {v:'',t:'s',s:ms({bg:BG_TOTAL})},
+    ]);
+    r4.push([
+      {v:'',t:'s',s:ms({bg:BG_TOTAL})},
+      {v:'매도',t:'s',s:ms({bold:true,color:C_DN,bg:BG_TOTAL,align:'center'})},
+      ...Array(4).fill(null).map(()=>({v:'',t:'s',s:ms({bg:BG_TOTAL})})),
+      {v:'',t:'s',s:ms({bg:BG_TOTAL})},
+      {v:Math.round(totSell4),t:'n',z:'#,##0',s:ms({bold:true,color:C_WHITE,bg:BG_TOTAL,sz:12})},
+      {v:'',t:'s',s:ms({bg:BG_TOTAL})},
+    ]);
+    let even4=true;
+    txRows.forEach(t=>{
+      const bg=even4?BG_EVEN:BG_ODD; even4=!even4;
+      const isBuy=t.type==='매수';
+      r4.push([
+        sC(t.date,bg),
+        {v:t.type,t:'s',s:ms({bold:true,color:isBuy?C_UP:C_DN,bg,align:'center'})},
+        sC(t.brkr,bg),
+        sC(t.name,bg,true),
+        sC(t.code,bg),
+        {v:t.qty,t:'n',z:'#,##0',s:ms({color:C_GRAY,bg})},
+        pxC(t.price,bg),
+        {v:Math.round(t.amt),t:'n',z:'#,##0',s:ms({color:isBuy?C_UP:C_DN,bg,bold:true})},
+        sC(t.note||'',bg),
+      ]);
+    });
+    const ws4=buildSheet(r4);
+    ws4['!cols']=[12,8,10,16,10,8,12,14,32].map(w=>({wch:w}));
+    ws4['!rows']=[{hpt:22}];
+    XLSX.utils.book_append_sheet(wb,ws4,'거래현황');
+
     XLSX.writeFile(wb,`주식트래커_${today}.xlsx`);
   } catch(e) {
     alert('Excel 내보내기 오류: ' + e.message);
@@ -2792,6 +2904,78 @@ function deleteMemo(){
   updSum();
   closeMemo();
   scheduleSync();
+}
+
+/* ══ 매도 관리 ══ */
+let _sellCode = null;
+function openSell(code){
+  _sellCode = code;
+  const d = D[code] || STOCKS.find(s=>s.code===code) || {};
+  document.getElementById('sellTitle').textContent = '💰 매도 관리 — ' + (d.name||code);
+  document.getElementById('sellCode').textContent = (d.realCode||code) + (d.brkr?' · '+d.brkr:'');
+  document.getElementById('sellDate').value = new Date().toISOString().slice(0,10);
+  document.getElementById('sellQty').value = '';
+  document.getElementById('sellPrice').value = '';
+  renderSellList();
+  document.getElementById('sellModal').classList.add('open');
+}
+function closeSell(){
+  document.getElementById('sellModal').classList.remove('open');
+  _sellCode = null;
+}
+function sellModalBgTap(e){ if(e.target===document.getElementById('sellModal')) closeSell(); }
+
+function renderSellList(){
+  if(!_sellCode) return;
+  const list=(loadSell()[_sellCode]||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  const wrap=document.getElementById('sellList');
+  if(!list.length){
+    wrap.innerHTML='<div style="font-size:12px;color:var(--txt2);text-align:center;padding:10px 0">매도 기록이 없습니다.</div>';
+    document.getElementById('sellSummary').textContent='';
+    return;
+  }
+  wrap.innerHTML=list.map(r=>{
+    const amt=(r.qty||0)*(r.price||0);
+    return `<div class="sell-item">
+      <span class="sell-item-date">${r.date}</span>
+      <span class="sell-item-qty">${r.qty}주</span>
+      <span class="sell-item-px">${r.price?r.price.toLocaleString('ko-KR'):'—'}원</span>
+      <span class="sell-item-amt">${amt?amt.toLocaleString('ko-KR'):'—'}원</span>
+      <button class="sell-item-del" onclick="delSellRecord('${r.id}')">삭제</button>
+    </div>`;
+  }).join('');
+  const totQty=list.reduce((s,r)=>s+(r.qty||0),0);
+  const totAmt=list.reduce((s,r)=>s+(r.qty||0)*(r.price||0),0);
+  document.getElementById('sellSummary').textContent=`총 ${totQty.toLocaleString('ko-KR')}주 · ${totAmt.toLocaleString('ko-KR')}원`;
+}
+
+function addSellRecord(){
+  if(!_sellCode) return;
+  const date=document.getElementById('sellDate').value;
+  const qty=parseInt(document.getElementById('sellQty').value)||0;
+  const price=parseInt(document.getElementById('sellPrice').value.replace(/,/g,''))||0;
+  if(!date){ alert('매도 날짜를 입력하세요.'); return; }
+  if(!qty){ alert('매도 수량을 입력하세요.'); return; }
+  if(!price){ alert('매도 단가를 입력하세요.'); return; }
+  const all=loadSell();
+  if(!all[_sellCode]) all[_sellCode]=[];
+  all[_sellCode].push({id:Date.now()+'_'+Math.random().toString(36).slice(2,7), date, qty, price});
+  saveSell(_sellCode, all[_sellCode]);
+  SELL=loadSell();
+  document.getElementById('sellQty').value='';
+  document.getElementById('sellPrice').value='';
+  renderSellList();
+  render();
+}
+
+function delSellRecord(id){
+  if(!_sellCode) return;
+  const all=loadSell();
+  all[_sellCode]=(all[_sellCode]||[]).filter(r=>r.id!==id);
+  saveSell(_sellCode, all[_sellCode]);
+  SELL=loadSell();
+  renderSellList();
+  render();
 }
 
 /* ══ 시장 지수 티커 (코스피/코스닥/환율/해외지수/비트코인) ══ */
