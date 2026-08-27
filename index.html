@@ -974,6 +974,7 @@ async function pushPortfolio() {
     dt: loadDt(),
     memo: loadMemo(),
     sell: loadSell(),
+    watch: loadWatch(),
     hist: _hist,
     del: [...loadDeleted()],  // 삭제한 기본(DFLT) 종목 코드 — 다른 기기에서도 되살아나지 않게 함께 동기화
     ts: Date.now()
@@ -1050,6 +1051,7 @@ async function pullPortfolio() {
     }
     if (data.memo && Object.keys(data.memo).length) localStorage.setItem(KM, JSON.stringify(data.memo));
     if (data.sell && Object.keys(data.sell).length) localStorage.setItem(KSL, JSON.stringify(data.sell));
+    if (Array.isArray(data.watch) && data.watch.length) saveWatch(data.watch);
     // 서버 hist와 로컬 hist 병합 (날짜 기준 최신 우선, 최대 365일)
     if (Array.isArray(data.hist) && data.hist.length > 0) {
       let localHist=[];
@@ -1063,7 +1065,7 @@ async function pullPortfolio() {
       localStorage.setItem(KH,JSON.stringify(combined));
     }
     // 메모리 상태 갱신
-    STOCKS = loadStocks(); BP = loadBP(); QTY = loadQty(); DT = loadDt(); MEMO = loadMemo(); SELL = loadSell();
+    STOCKS = loadStocks(); BP = loadBP(); QTY = loadQty(); DT = loadDt(); MEMO = loadMemo(); SELL = loadSell(); WATCH = loadWatch();
     return true;
   } catch(e) { return false; }
 }
@@ -1736,6 +1738,7 @@ function selectWatchAc(code,name){
   }
   WATCH.push(code);
   saveWatch(WATCH);
+  scheduleSync();
   if(!WD[code])WD[code]={code,name,ok:false};
   const el=document.getElementById('iWatch');if(el)el.value='';
   renderWatchPills();
@@ -1824,6 +1827,7 @@ async function addWatch(){
   if(WATCH.includes(code)){alert('이미 추가된 종목입니다.');el.value='';return;}
   WATCH.push(code);
   saveWatch(WATCH);
+  scheduleSync();
   el.value='';
   renderWatchPills();
   if(!D[code]&&!WD[code])loadWatchOne(code);
@@ -1833,6 +1837,7 @@ function removeWatch(code){
   WATCH=loadWatch();
   WATCH=WATCH.filter(c=>c!==code);
   saveWatch(WATCH);
+  scheduleSync();
   renderWatchPills();
   if(flt==='watch')render();
 }

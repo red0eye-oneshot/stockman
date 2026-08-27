@@ -15,6 +15,7 @@ android.keystore
 *.idsig
 portfolio.json
 recommend_dates.json
+telegram_config.json
 
 # ── 빌드 산출물 / 로그 (레포에 불필요) ─────────────────
 build/

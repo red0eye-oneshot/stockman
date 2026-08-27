@@ -13,7 +13,7 @@
 선택 패키지: pykrx     (pip install pykrx)  ← 더 정확한 데이터
 """
 
-import os, sys, re, json, time, calendar, threading, socket, webbrowser, io
+import os, sys, re, json, time, calendar, threading, socket, webbrowser, io, html
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote, quote
@@ -72,6 +72,20 @@ CACHE_TTL     = 60    # 장중 캐시 유효시간(초) — 빠른 실시간 갱
 CACHE_TTL_OFF = 1800  # 장외 캐시 유효시간(초) — 30분 (장외엔 가격 변동 없음)
 TIMEOUT       = 5     # HTTP 요청 타임아웃(초) — 느린 서버 빠르게 포기
 API_KEY   = os.environ.get('API_KEY', '')        # 비어있으면 인증 비활성 (로컬 개발용)
+
+# ── 텔레그램 봇 (일일 리포트 발송) ──────────────────────────
+# 보안: 토큰/챗ID를 소스에 직접 적지 않음 → 환경변수(Render 배포용) 우선,
+# 없으면 로컬 telegram_config.json(.gitignore 처리, 깃허브에 올라가지 않음)에서 읽음.
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'telegram_config.json'), 'r', encoding='utf-8') as _tf:
+            _tg_cfg = json.load(_tf)
+        TELEGRAM_TOKEN   = TELEGRAM_TOKEN   or _tg_cfg.get('bot_token', '')
+        TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or _tg_cfg.get('chat_id', '')
+    except Exception:
+        pass
 
 HEADERS = {
     "User-Agent": (
@@ -1491,10 +1505,10 @@ def load_portfolio() -> dict:
             with open(PORTFOLIO_PATH, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except FileNotFoundError:
-        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}, 'sell': {}}
+        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}, 'sell': {}, 'watch': []}
     except Exception as e:
         _log(f'portfolio load error: {e}')
-        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}, 'sell': {}}
+        return {'stocks': [], 'bp': {}, 'qty': {}, 'dt': {}, 'memo': {}, 'sell': {}, 'watch': []}
 
 def save_portfolio(data: dict):
     """portfolio.json 저장."""
@@ -1611,6 +1625,169 @@ def get_recommend_dates() -> dict:
     return load_recommend_json()
 
 
+# ════════════════════════════════════════════════════════
+# 텔레그램 일일 리포트 (관심종목 + 보유종목 동향/이슈 요약)
+# ════════════════════════════════════════════════════════
+
+def _strip_html(s: str) -> str:
+    """HTML 태그 제거 + 엔티티 디코딩 (뉴스 제목 등)"""
+    s = re.sub(r'<[^>]+>', '', s or '')
+    return html.unescape(s).strip()
+
+
+def fetch_stock_news(code: str, limit: int = 2) -> list:
+    """네이버 종목뉴스 최신 헤드라인 조회 (실패 시 빈 리스트, 절대 예외를 밖으로 던지지 않음)"""
+    try:
+        url = f"https://finance.naver.com/item/news_news.naver?code={code}&page=1&sm=title_entity_id.basic"
+        r = SESSION.get(url, headers={**HEADERS, "Accept": "text/html,*/*"}, timeout=TIMEOUT)
+        r.encoding = 'euc-kr'
+        body = r.text
+        rows = re.findall(
+            r'<td\s+class="title">\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
+            r'<td\s+class="date">\s*([^<]+?)\s*</td>',
+            body, re.S)
+        out, seen = [], set()
+        for href, title, date in rows:
+            t = _strip_html(title)
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            link = href if href.startswith('http') else f"https://finance.naver.com{href}"
+            out.append({'title': t, 'date': date.strip(), 'link': link})
+            if len(out) >= limit:
+                break
+        return out
+    except Exception as e:
+        _log(f"[뉴스ERR] fetch_stock_news({code}): {type(e).__name__}: {e}")
+        return []
+
+
+def build_daily_report() -> str:
+    """관심종목 + 보유종목 전체를 훑어 일일 리포트 텍스트 생성.
+    시세/뉴스 조회는 공유 스레드풀로 병렬 처리해 종목이 많아도 전체 소요시간을 줄인다."""
+    pf = load_portfolio()
+    stocks = pf.get('stocks', []) or []
+    watch  = pf.get('watch', []) or []
+    bp_map, qty_map = pf.get('bp', {}) or {}, pf.get('qty', {}) or {}
+
+    entries = []  # (code, name_hint, brkr, bp, qty)
+    seen = set()
+    for s in stocks:
+        code = s.get('realCode') or s.get('code')
+        entries.append((code, s.get('name', ''), s.get('brkr', ''),
+                         bp_map.get(s.get('code')), qty_map.get(s.get('code'))))
+        seen.add(code)
+    watch_codes = [c for c in watch if c not in seen]
+
+    all_codes = list({e[0] for e in entries} | set(watch_codes))
+    ex = _shared_pool
+    d_futs = {c: ex.submit(get_stock_data, c) for c in all_codes}
+    n_futs = {c: ex.submit(fetch_stock_news, c, 2) for c in all_codes}
+    d_map, n_map = {}, {}
+    for c, f in d_futs.items():
+        try:
+            d_map[c] = f.result(timeout=15)
+        except Exception as e:
+            _log(f"[리포트] get_stock_data({c}) 타임아웃/오류: {e}")
+            d_map[c] = {'ok': False, 'code': c}
+    for c, f in n_futs.items():
+        try:
+            n_map[c] = f.result(timeout=10)
+        except Exception:
+            n_map[c] = []
+
+    def block(code, name_hint='', brkr='', bp=None, qty=None) -> str:
+        d = d_map.get(code) or {'ok': False}
+        name = d.get('name') or name_hint or code
+        if not d.get('ok') or d.get('px') is None:
+            return f"■ {name} ({code})\n  ⚠ 시세 조회 실패\n"
+
+        px, prev = d['px'], d.get('prevClose')
+        chg_r = ((px - prev) / prev * 100) if prev else None
+        chg_txt = f"{chg_r:+.2f}%" if chg_r is not None else "집계중"
+        lines = [f"■ {name} ({code}){' · '+brkr if brkr else ''}",
+                 f"  현재가 {px:,.0f}원 ({chg_txt})"]
+
+        if bp and qty:
+            gain_r = (px - bp) / bp * 100
+            lines.append(f"  보유 {qty:,}주 · 매수단가 {bp:,.0f}원 · 평가손익 {gain_r:+.2f}%")
+
+        target = d.get('targetPrice')
+        if target:
+            gap = (target - px) / px * 100
+            lines.append(f"  컨센서스 목표가 {target:,.0f}원 (현재가 대비 {gap:+.1f}%, 증권사 {d.get('institutionCount') or '?'}곳)")
+
+        inv_daily = d.get('invDaily') or []
+        if inv_daily:
+            last3 = inv_daily[-3:]
+            organ_sum = sum((r.get('organ') or 0) for r in last3)
+            frgn_sum  = sum((r.get('frgn') or 0) for r in last3)
+            organ_lbl = '순매수' if organ_sum > 0 else ('순매도' if organ_sum < 0 else '중립')
+            frgn_lbl  = '순매수' if frgn_sum > 0 else ('순매도' if frgn_sum < 0 else '중립')
+            lines.append(f"  최근 3일 수급: 기관 {organ_lbl} · 외국인 {frgn_lbl}")
+
+        news = n_map.get(code) or []
+        if news:
+            for n in news:
+                lines.append(f"  📰 {n['title']} ({n['date']})")
+        else:
+            lines.append("  📰 최근 뉴스 없음")
+        return "\n".join(lines) + "\n"
+
+    today = datetime.now().strftime('%Y-%m-%d (%a)')
+    parts = [f"📊 주식트래커 일일 리포트\n{today} 장마감 기준\n" + "─"*22]
+
+    if entries:
+        parts.append(f"\n【 보유 종목 ({len(entries)}) 】\n")
+        for code, name_hint, brkr, bp, qty in entries:
+            parts.append(block(code, name_hint, brkr, bp, qty))
+    if watch_codes:
+        parts.append(f"\n【 관심 종목 ({len(watch_codes)}) 】\n")
+        for code in watch_codes:
+            parts.append(block(code))
+    if not entries and not watch_codes:
+        parts.append("\n등록된 보유/관심 종목이 없습니다.\n")
+
+    tips = []
+    for code, name_hint, brkr, bp, qty in entries:
+        d = d_map.get(code) or {}
+        px, target = d.get('px'), d.get('targetPrice')
+        if px and target and px >= target:
+            tips.append(f"• {name_hint or code}: 목표가 도달 → 익절 검토")
+    if tips:
+        parts.append("\n【 종합 제안 】\n" + "\n".join(tips) + "\n")
+
+    return "\n".join(parts)
+
+
+def send_telegram_message(text: str) -> bool:
+    """텔레그램으로 메시지 발송 (4096자 제한 → 줄 단위로 안전하게 분할 전송)"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        _log("[텔레그램ERR] TELEGRAM_TOKEN/CHAT_ID 미설정")
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    chunks, cur = [], ''
+    for line in text.split('\n'):
+        if len(cur) + len(line) + 1 > 3500:
+            chunks.append(cur)
+            cur = ''
+        cur += line + '\n'
+    if cur:
+        chunks.append(cur)
+
+    ok_all = True
+    for chunk in chunks:
+        try:
+            r = requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': chunk}, timeout=20)
+            if not r.ok:
+                _log(f"[텔레그램ERR] sendMessage 실패: {r.status_code} {r.text[:200]}")
+                ok_all = False
+        except Exception as e:
+            _log(f"[텔레그램ERR] sendMessage 예외: {type(e).__name__}: {e}")
+            ok_all = False
+    return ok_all
+
+
 class Handler(BaseHTTPRequestHandler):
 
     def _check_auth(self) -> bool:
@@ -1670,6 +1847,16 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == '/api/portfolio':
             self._serve_json(load_portfolio())
+
+        elif path == '/api/send_report':
+            # 관심종목+보유종목 일일 리포트를 생성해 텔레그램으로 발송 (예약 작업이 매일 호출)
+            try:
+                report = build_daily_report()
+                sent = send_telegram_message(report)
+                self._serve_json({'ok': sent, 'chars': len(report)})
+            except Exception as e:
+                _log(f"[리포트ERR] /api/send_report: {type(e).__name__}: {e}")
+                self._serve_json({'ok': False, 'error': str(e)})
 
         elif path.startswith('/api/search/'):
             query = unquote(path.split('/api/search/', 1)[-1].strip('/'))
@@ -1760,6 +1947,8 @@ class Handler(BaseHTTPRequestHandler):
                     data['memo'] = {}
                 if 'sell' not in data:
                     data['sell'] = {}
+                if 'watch' not in data:
+                    data['watch'] = []
                 save_portfolio(data)
                 self._serve_json({'ok': True, 'saved': True})
             except Exception as e:
