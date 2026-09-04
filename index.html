@@ -648,7 +648,10 @@ if ('serviceWorker' in navigator) {
     <div class="mhandle"></div>
     <div class="mhdr">
       <h2>📋 종목 관리</h2>
-      <button class="btnx" onclick="closeModal()">✕</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btnadd" id="btnMdlSave" style="width:auto;padding:6px 14px" onclick="saveStockChanges()">저장</button>
+        <button class="btnx" onclick="closeModal()">✕</button>
+      </div>
     </div>
     <div class="mbody">
       <div class="aform">
@@ -673,16 +676,16 @@ if ('serviceWorker' in navigator) {
       <div class="aform">
         <h3>➕ 종목 추가</h3>
         <div class="arow">
-          <input class="inp" id="iName" placeholder="종목명 (코드 없이도 자동검색)" maxlength="20">
-          <input class="inp inps" id="iCode" placeholder="종목코드(선택)" maxlength="8">
+          <input class="inp" id="iName" placeholder="종목명 또는 종목코드 (한쪽만 입력해도 자동검색)" maxlength="20" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addStock();}">
+          <button class="btnadd" style="width:auto;padding:6px 16px;flex-shrink:0" onclick="addStock()">추가</button>
         </div>
-        <div class="arow" style="margin-top:0">
+        <div class="arow" style="margin-top:6px">
+          <input class="inp inps" id="iCode" placeholder="종목코드(선택)" maxlength="8" onkeydown="if(event.key==='Enter'){event.preventDefault();addStock();}">
           <input class="inp" id="iBrkr" list="brkrList" placeholder="증권사 선택 또는 새 이름 입력" autocomplete="off" style="flex:1"><datalist id="brkrList"></datalist>
           <button class="btnadd" style="width:auto;padding:6px 12px;background:var(--surf2);border:1px solid var(--brd2);color:var(--txt);flex-shrink:0" onclick="addCustomBroker()" title="종목 없이 증권사만 등록">＋등록</button>
         </div>
-        <div style="font-size:11px;color:var(--txt3);margin:2px 0 4px">새 증권사 이름을 입력한 뒤 "＋등록"을 누르면 종목 없이도 상단 메뉴에 바로 추가됩니다.</div>
+        <div style="font-size:11px;color:var(--txt3);margin:2px 0 4px">종목코드·증권사는 선택 입력입니다. 새 증권사 이름만 입력한 뒤 "＋등록"을 누르면 종목 없이도 상단 메뉴에 바로 추가됩니다.</div>
         <div id="brkrTags"></div>
-        <button class="btnadd" onclick="addStock()">추가하기</button>
         <div class="amsg" id="amsg"></div>
       </div>
       <div id="mlist"></div>
@@ -909,6 +912,9 @@ const KSL='srk_sell_v1'; // 종목별 매도 기록: {code:[{id,date,qty,price},
 const KDEL='srk_deleted_v1'; // 사용자가 삭제한 기본(DFLT) 종목 코드 — 재로드 시 되살아나지 않도록 기억
 const loadDeleted=()=>{try{return new Set(JSON.parse(localStorage.getItem(KDEL)||'[]'));}catch{return new Set();}};
 const saveDeleted=set=>localStorage.setItem(KDEL,JSON.stringify([...set]));
+// 종목 목록을 "적용"하는 모든 경로(서버 pull, 가져오기, 기본종목 병합)에서 공통으로 써야 함.
+// 여기 한 곳만 지키면, 어떤 경로로 들어온 데이터든 이미 삭제한 종목은 절대 되살아나지 않는다.
+const filterDeleted=arr=>{const del=loadDeleted();return (arr||[]).filter(s=>s&&!del.has(s.code));};
 const loadWatch=()=>{try{return JSON.parse(localStorage.getItem(KW)||'[]');}catch{return[];}};
 const saveWatch=arr=>localStorage.setItem(KW,JSON.stringify(arr));
 const loadStocks = () => {
@@ -923,6 +929,8 @@ const loadStocks = () => {
       if(d){if(!m.brkr)m.brkr=d.brkr||''; if(d.realCode)m.realCode=d.realCode; if(d.defDt)m.defDt=d.defDt;}
       return m;
     });
+    // 혹시 localStorage에 삭제된 종목이 섞여 들어와 있어도 항상 걸러냄 (방어적 처리)
+    a=filterDeleted(a);
     // DFLT에만 있는 신규 종목 추가 (단, 사용자가 삭제한 종목은 되살리지 않음)
     const del=loadDeleted();
     DFLT.forEach(d=>{if(!a.find(x=>x.code===d.code) && !del.has(d.code))a.push({...d});});
@@ -1029,6 +1037,12 @@ async function pullPortfolio() {
       data.del.forEach(c=>del.add(c));
       saveDeleted(del);
     }
+    // 삭제 push가 서버에 반영되기 전에 재시작/새로고침되는 등의 타이밍 문제로
+    // 서버가 아직 삭제된 종목을 들고 있을 수 있음 → 로컬이 알고 있는 삭제 목록으로 한 번 더 걸러내
+    // "삭제했는데 되살아남" 버그를 방지. 걸러진 경우 아래에서 서버에도 정정된 목록을 다시 push함.
+    const delSet = loadDeleted();
+    const staleRestored = data.stocks.filter(s => delSet.has(s.code));
+    if (staleRestored.length) data.stocks = filterDeleted(data.stocks);
     // 서버 데이터가 있으면 localStorage 덮어쓰기
     if (data.stocks.length > 0) {
       localStorage.setItem(KS, JSON.stringify(data.stocks));
@@ -1066,6 +1080,12 @@ async function pullPortfolio() {
     }
     // 메모리 상태 갱신
     STOCKS = loadStocks(); BP = loadBP(); QTY = loadQty(); DT = loadDt(); MEMO = loadMemo(); SELL = loadSell(); WATCH = loadWatch();
+    // 서버가 들고 있던 "삭제됐어야 할" 종목을 걸러냈다면, 정정된 목록을 서버에도 다시 push해
+    // 다음 접속(다른 기기 포함) 때 똑같이 되살아나지 않게 함
+    if (staleRestored.length) {
+      console.log(`[삭제복구방지] 서버에 남아있던 삭제종목 ${staleRestored.length}개 제외 후 재동기화:`, staleRestored.map(s=>s.name).join(', '));
+      pushPortfolio();
+    }
     return true;
   } catch(e) { return false; }
 }
@@ -2164,6 +2184,24 @@ function delStock(i){
   delete D[c]; renderMList(); render();
 }
 
+/* ══ 종목관리 헤더 "저장" 버튼 ══
+   추가/삭제는 이미 각자 즉시 로컬저장+동기화 예약(scheduleSync, 500ms 디바운스)까지 하지만,
+   사용자가 눈으로 "저장됐다"를 바로 확인할 수 있게 대기 중인 동기화를 즉시 실행하고 결과를 표시함. */
+async function saveStockChanges(){
+  const btn=document.getElementById('btnMdlSave');
+  if(!btn) return;
+  const orig='저장';
+  btn.disabled=true; btn.textContent='저장 중...';
+  if(_syncTimer){ clearTimeout(_syncTimer); _syncTimer=null; }
+  try{
+    await pushPortfolio();
+    btn.textContent='✓ 저장됨';
+  }catch(e){
+    btn.textContent='❌ 실패';
+  }
+  setTimeout(()=>{ btn.disabled=false; btn.textContent=orig; }, 1500);
+}
+
 async function addStock(){
   const nameEl = document.getElementById('iName');
   const codeEl = document.getElementById('iCode');
@@ -2176,6 +2214,9 @@ async function addStock(){
   msgEl.style.color='';
 
   if(!name && !rawCode){ msgEl.textContent='종목명 또는 종목코드를 입력하세요.'; msgEl.style.display='block'; return; }
+
+  // 숫자만 입력했으면 6자리 코드로 보정 (예: "5930" → "005930")
+  if(rawCode && /^\d+$/.test(rawCode)) rawCode = rawCode.padStart(6,'0');
 
   // 종목코드를 안 넣었으면 종목명으로 서버 검색해서 자동으로 채움 (관심종목 추가와 동일한 방식)
   if(!rawCode){
@@ -2195,6 +2236,30 @@ async function addStock(){
       }
     }catch(e){
       msgEl.textContent = '종목 검색 중 오류가 발생했습니다. 6자리 코드로 다시 시도해주세요.';
+      msgEl.style.display='block';
+      if(btnEl){ btnEl.disabled=false; }
+      return;
+    }
+    if(btnEl){ btnEl.disabled=false; }
+  }
+  // 종목명을 안 넣었으면(코드만 입력) 코드로 시세를 조회해 정식 종목명을 자동으로 채움
+  else if(!name){
+    if(!/^[A-Z0-9]{4,8}$/.test(rawCode)){ msgEl.textContent='코드는 4~8자리 영문/숫자입니다.'; msgEl.style.display='block'; return; }
+    msgEl.style.color=''; msgEl.textContent='조회 중...'; msgEl.style.display='block';
+    if(btnEl){ btnEl.disabled=true; }
+    try{
+      const r = await apiFetch(`${SRV}/api/stock/${rawCode}`);
+      const j = await r.json();
+      if(j && j.name){
+        name = j.name;
+      } else {
+        msgEl.textContent = `"${rawCode}" 종목명을 찾을 수 없습니다. 종목명을 함께 입력하세요.`;
+        msgEl.style.display='block';
+        if(btnEl){ btnEl.disabled=false; }
+        return;
+      }
+    }catch(e){
+      msgEl.textContent = '종목 조회 중 오류가 발생했습니다. 종목명을 함께 입력하세요.';
       msgEl.style.display='block';
       if(btnEl){ btnEl.disabled=false; }
       return;
@@ -2322,7 +2387,7 @@ async function importData() {
       payload.del.forEach(c=>del.add(c));
       saveDeleted(del);
     }
-    if(payload.stocks) { STOCKS = payload.stocks; saveStocks(STOCKS); }
+    if(payload.stocks) { STOCKS = filterDeleted(payload.stocks); saveStocks(STOCKS); }
     if(payload.bp)  localStorage.setItem(KB, JSON.stringify(payload.bp));
     if(payload.qty) localStorage.setItem(KQ, JSON.stringify(payload.qty));
     if(payload.dt)  localStorage.setItem(KD, JSON.stringify(payload.dt));
