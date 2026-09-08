@@ -123,15 +123,20 @@ _shared_pool = ThreadPoolExecutor(max_workers=40)
 # 새로고침(F5) 정도의 짧은 공백은 grace 시간 안에 새 heartbeat가 다시 들어오므로
 # 서버가 꺼지지 않음 — 진짜로 탭을 닫고 한동안 안 열었을 때만 종료됨.
 _last_heartbeat = time.time()
-HEARTBEAT_GRACE = 90   # 이 시간(초) 동안 heartbeat가 없으면 종료
-                       # (브라우저가 백그라운드 탭의 setInterval을 느리게 만드는 경우까지 감안한 여유)
+# 90초는 너무 짧았음 — Chrome 등이 "다른 탭 보는 중"이거나 창을 최소화하면
+# 백그라운드 탭의 setInterval을 1분 이상 단위로 강하게 스로틀링하는 경우가 있어,
+# 탭을 안 닫았는데도 서버가 꺼지는 오탐(false positive)이 실제로 발생함.
+# 진짜 목적(탭을 닫고 한참 방치했을 때만 종료)은 유지하면서 오탐을 없애기 위해
+# 여유를 10분으로 크게 늘림.
+HEARTBEAT_GRACE = 600  # 이 시간(초) 동안 heartbeat가 없으면 종료
 
 def _heartbeat_watchdog():
     while True:
         time.sleep(10)
         idle = time.time() - _last_heartbeat
         if idle > HEARTBEAT_GRACE:
-            print(f"\n  브라우저 탭이 닫힌 것으로 감지됨 ({idle:.0f}초간 응답 없음) → 서버 종료")
+            # pyw(콘솔 없음)로 실행 중이면 print()는 아무도 못 보므로 반드시 _log()로도 남김
+            _log(f"브라우저 탭이 닫힌 것으로 감지됨 ({idle:.0f}초간 응답 없음) → 서버 종료")
             os._exit(0)
 
 # ── KRX 실패 이력 ───────────────────────────────────────
@@ -2026,7 +2031,7 @@ def main():
     print(f"   캐시 TTL:     장중 {CACHE_TTL}초 / 장외 {CACHE_TTL_OFF}초")
     print(f"   장중 여부:    {'장중' if is_market_open() else '장외'}")
     if not is_cloud:
-        print(f"   자동 종료:    브라우저 탭을 닫고 {HEARTBEAT_GRACE}초 지나면 서버 자동 종료")
+        print(f"   자동 종료:    브라우저 탭을 닫고 {HEARTBEAT_GRACE//60}분 지나면 서버 자동 종료")
     print()
     print("   종료: Ctrl+C")
     print("=" * 55)
