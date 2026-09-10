@@ -1563,6 +1563,7 @@ def parse_recommend_excel() -> dict:
     if not OPENPYXL or not os.path.exists(EXCEL_PATH):
         return {}
     result = {}
+    wb = None
     try:
         wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True, read_only=True)
         for ws in wb.worksheets:
@@ -1596,6 +1597,14 @@ def parse_recommend_excel() -> dict:
     except Exception as e:
         _log(f'[추천주] 엑셀 파싱 오류: {type(e).__name__}: {e}')
         return {}
+    finally:
+        # read_only 워크북은 명시적으로 close()하지 않으면 파일 핸들(zip)이 계속 열려있어
+        # 엑셀에서 이 파일을 저장하려 할 때 "공유 위반" 오류가 날 수 있음 → 반드시 닫아줌
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
     return result
 
 def load_recommend_json() -> dict:
