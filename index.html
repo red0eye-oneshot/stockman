@@ -2300,9 +2300,15 @@ async function addStock(){
   }
   STOCKS.push(newEntry);
   saveStocks(STOCKS);
-  // 예전에 삭제했던 기본 종목을 다시 추가한 경우 삭제 목록에서도 제외
+  // 예전에 삭제했던 기본 종목을 다시 추가한 경우 삭제 목록에서도 제외.
+  // 같은 종목을 여러 증권사에 나눠 담을 때는 코드 뒤에 A,B,C가 붙어 저장되므로(newEntry.code),
+  // 사용자가 입력한 원래 코드(rawCode)뿐 아니라 실제 저장되는 코드도 함께 삭제 목록에서 빼야
+  // "추가해도 필터에 걸려 다시 사라지는" 문제가 생기지 않는다.
   const del=loadDeleted();
-  if(del.has(rawCode)){ del.delete(rawCode); saveDeleted(del); }
+  let delChanged=false;
+  if(del.has(rawCode)){ del.delete(rawCode); delChanged=true; }
+  if(del.has(newEntry.code)){ del.delete(newEntry.code); delChanged=true; }
+  if(delChanged) saveDeleted(del);
   nameEl.value=''; codeEl.value=''; brkrEl.value='';
   msgEl.style.display='none';
   renderMList();
@@ -2716,7 +2722,8 @@ async function exportExcel() {
     h2a.forEach(c=>withBottomDiv(c));
     h2b.forEach(c=>withBottomDiv(c,'medium'));
     const r2=[h2a,h2b];
-    hist.forEach((h,i)=>{
+    const histDesc=hist.slice().reverse();   // 최신 날짜가 위로 오도록 내림차순
+    histDesc.forEach((h,i)=>{
       const p=h.portfolio,bg=i%2===0?BG_EVEN:BG_ODD;
       const brkrI={},brkrE={};
       BRKRS.forEach(b=>{brkrI[b]=0;brkrE[b]=0;});
@@ -2755,7 +2762,7 @@ async function exportExcel() {
     /* ── 시트3: 종목이력 (매수단가~오늘손익 제거) ── */
     const h3=['날짜','증권사','종목명','종목코드','현재가','등락률%'];
     const r3=[h3.map(hC)];
-    hist.forEach((h,i)=>{
+    histDesc.forEach((h,i)=>{
       (h.stocks||[]).forEach((s,j)=>{
         const bg=(i+j)%2===0?BG_EVEN:BG_ODD;
         r3.push([sC(h.date,bg),sC(s.brkr||'',bg),sC(s.name,bg),sC(s.code,bg),
@@ -2767,6 +2774,9 @@ async function exportExcel() {
     const ws3=buildSheet(r3);
     ws3['!cols']=[12,10,16,10,12,10].map(w=>({wch:w}));
     ws3['!rows']=[{hpt:22}];
+    // 증권사/종목명 등 헤더 전체에 자동필터 드롭다운 추가 + 헤더행 고정(스크롤해도 필터 버튼이 보이게)
+    ws3['!autofilter']={ref:`A1:F${r3.length}`};
+    ws3['!freeze']={xSplit:0,ySplit:1,topLeftCell:'A2',activePane:'bottomLeft',state:'frozen'};
     XLSX.utils.book_append_sheet(wb,ws3,'종목이력');
 
     /* ── 시트4: 거래현황 (매수·매도 내역) ── */
