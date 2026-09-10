@@ -1926,9 +1926,21 @@ function calcBrkrStats(stocks){
   const brs=ok.filter(d=>BP[d.code]&&d.px).map(d=>calcR(d.px,BP[d.code])).filter(r=>r!=null);
   let totI=0,totE=0,hasPf=false;
   ok.forEach(d=>{const bp=BP[d.code],q=QTY[d.code];if(bp&&q&&d.px){totI+=bp*q;totE+=d.px*q;hasPf=true;}});
+  /* 일간수익(오늘손익) 금액 — 전일종가 대비 오늘 가격변동 × 보유수량 합산 */
+  let today=0,hasToday=false;
+  ok.forEach(d=>{
+    const q=QTY[d.code]; if(!q||d.px==null) return;
+    const cans=d.candles||[], isRT=d.src==='네이버 실시간';
+    const prev=d.prevClose??(isRT&&cans.length>0?cans[cans.length-1].close:!isRT&&cans.length>1?cans[cans.length-2].close:null);
+    if(!prev) return;
+    today+=(d.px-prev)*q; hasToday=true;
+  });
+  const todayBase=hasToday?totE-today:null;   // 전일 종가 기준 평가금액(오늘수익률의 분모)
   return{cnt:stocks.length,ok:ok.length,avg1:avg(r1s),avg3:avg(r3s),avgB:avg(brs),
     totI:hasPf?totI:null,totE:hasPf?totE:null,gain:hasPf?totE-totI:null,
-    ret:(hasPf&&totI>0)?(totE-totI)/totI:null};
+    ret:(hasPf&&totI>0)?(totE-totI)/totI:null,
+    today:hasToday?today:null,
+    todayR:(hasToday&&todayBase>0)?today/todayBase:null};
 }
 /* ══ 증권사별 고유 색상 ══
    증권사 이름마다 눈에 띄는 고유 색을 부여 (아는 증권사는 실제 브랜드 느낌 색, 새로 등록한 증권사는 이름 기반 해시로 자동 배정). */
@@ -1960,6 +1972,7 @@ function brkrHdr(nm,st){
   const sv=(v,l)=>`<div class="brkr-stat"><span class="brkr-sl">${l}</span><span class="brkr-sv ${rCls(v)}">${v!=null?fmtR(v):'—'}</span></div>`;
   const sw=(v,l)=>`<div class="brkr-stat"><span class="brkr-sl">${l}</span><span class="brkr-sv ${rCls(v)}">${v!=null?fmtW(v):'—'}</span></div>`;
   const sm=(v,l,cls)=>`<div class="brkr-stat"><span class="brkr-sl">${l}</span><span class="brkr-sv ${cls||'flat'}">${v!=null?fmtMan(v):'—'}</span></div>`;
+  const sd=(amt,ratio,l)=>`<div class="brkr-stat"><span class="brkr-sl">${l}</span><span class="brkr-sv ${rCls(amt)}">${amt!=null?fmtW(amt):'—'}${ratio!=null?` (${fmtR(ratio)})`:''}</span></div>`;
   const col=brkrColor(nm);
   return`<div class="brkr-hdr" style="border-left:5px solid ${col};background:linear-gradient(135deg,${col}26,var(--surf2));border-top-color:${col}55;border-right-color:${col}55;border-bottom-color:${col}55">
     <span class="brkr-name" style="color:${col}">🏦 ${nm}</span>
@@ -1969,6 +1982,7 @@ function brkrHdr(nm,st){
       ${st.totE!=null?sm(st.totE,'평가금액',rCls(st.gain)):''}
       ${st.ret!=null?sv(st.ret,'수익률'):''}
       ${st.gain!=null?sw(st.gain,'손익'):''}
+      ${st.today!=null?sd(st.today,st.todayR,'일간수익'):''}
     </div>
   </div>`;
 }
