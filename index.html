@@ -948,6 +948,10 @@ const loadMemo= () => {try{return JSON.parse(localStorage.getItem(KM)||'{}');}ca
 const saveMemo= (c,k,v) => {const m=loadMemo();if(!m[c])m[c]={};if(v)m[c][k]=v;else delete m[c][k];if(!Object.keys(m[c]).length)delete m[c];localStorage.setItem(KM,JSON.stringify(m));};
 const loadSell= () => {try{return JSON.parse(localStorage.getItem(KSL)||'{}');}catch{return {};}};
 const saveSell= (c,arr) => {const m=loadSell();if(arr&&arr.length)m[c]=arr;else delete m[c];localStorage.setItem(KSL,JSON.stringify(m));scheduleSync();};
+// 종목별 누적 매도수량이 보유수량 이상이면 "전량매도"로 보고 메인 목록/종목수에서 자동 제외.
+// (보유수량을 입력 안 한 종목은 제외 대상에서 빠짐 — 실수로 사라지는 것 방지)
+const soldQty = code => (loadSell()[code]||[]).reduce((s,r)=>s+(r.qty||0),0);
+const isFullySold = code => { const q=loadQty()[code]; return !!q && soldQty(code) >= q; };
 
 /* ══ 상태 ══ */
 let STOCKS = loadStocks(), BP = loadBP(), QTY = loadQty(), DT = loadDt(), MEMO = loadMemo(), SELL = loadSell();
@@ -1461,8 +1465,8 @@ function setF(f,btn){
 }
 
 function updSum(){
-  BP=loadBP(); QTY=loadQty();
-  const ok=Object.values(D).filter(d=>d.ok);
+  BP=loadBP(); QTY=loadQty(); SELL=loadSell();
+  const ok=Object.values(D).filter(d=>d.ok && !isFullySold(d.code));
   const v1=ok.filter(d=>d.r1!=null).map(d=>d.r1);
   const v3=ok.filter(d=>d.r3!=null).map(d=>d.r3);
   const avg=a=>a.reduce((s,v)=>s+v,0)/a.length;
@@ -1995,6 +1999,7 @@ function render() {
     document.getElementById('list').innerHTML='<div class="brkr-section"><div class="brkr-cards">'+STOCKS.slice(0,6).map(skCard).join('')+'</div></div>'; return;
   }
   let list=STOCKS.map(s=>D[s.code]||{...s,ok:false,_p:true});
+  list=list.filter(d=>!isFullySold(d.code));   // 전량매도 종목은 목록/종목수에서 자동 제외
   if(flt==='up')  list=list.filter(d=>{const b=BP[d.code];return b&&d.px?d.px>b:d.r1>0;});
   else if(flt==='dn')  list=list.filter(d=>{const b=BP[d.code];return b&&d.px?d.px<b:d.r1<0;});
   else if(flt==='etf') list=list.filter(d=>isETF(d.realCode||d.code));
@@ -3059,7 +3064,7 @@ function addSellRecord(){
   document.getElementById('sellQty').value='';
   document.getElementById('sellPrice').value='';
   renderSellList();
-  render();
+  render(); updSum();   // 전량매도 시 메인 종목수(전체 카운트)도 즉시 정리
 }
 
 function delSellRecord(id){
@@ -3069,7 +3074,7 @@ function delSellRecord(id){
   saveSell(_sellCode, all[_sellCode]);
   SELL=loadSell();
   renderSellList();
-  render();
+  render(); updSum();   // 매도기록 삭제로 다시 보유수량이 남으면 종목수에 즉시 복원
 }
 
 /* ══ 시장 지수 티커 (코스피/코스닥/환율/해외지수/비트코인) ══ */
