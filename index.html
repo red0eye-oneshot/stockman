@@ -791,6 +791,7 @@ if ('serviceWorker' in navigator) {
       </div>
     </div>
     <div class="memo-foot">
+      <button class="memo-del" id="btnSellClosed" onclick="toggleSellClosed()" style="flex:1">전량매도 완료 처리</button>
       <button class="memo-cancel" style="margin-left:auto" onclick="closeSell()">닫기</button>
     </div>
   </div>
@@ -948,11 +949,15 @@ const loadMemo= () => {try{return JSON.parse(localStorage.getItem(KM)||'{}');}ca
 const saveMemo= (c,k,v) => {const m=loadMemo();if(!m[c])m[c]={};if(v)m[c][k]=v;else delete m[c][k];if(!Object.keys(m[c]).length)delete m[c];localStorage.setItem(KM,JSON.stringify(m));};
 const loadSell= () => {try{return JSON.parse(localStorage.getItem(KSL)||'{}');}catch{return {};}};
 const saveSell= (c,arr) => {const m=loadSell();if(arr&&arr.length)m[c]=arr;else delete m[c];localStorage.setItem(KSL,JSON.stringify(m));scheduleSync();};
-// 매도 등록 시 보유수량(QTY)에서 매도수량만큼 자동 차감(addSellRecord/delSellRecord에서 처리).
-// 매도기록이 1건 이상 있고 남은 보유수량이 0 이하이면 "전량매도"로 보고 메인 목록/종목수에서 자동 제외.
-// (매도 등록을 한 번도 안 한 종목은 QTY를 안 채워넣었어도 절대 숨겨지지 않음 — 실수 방지)
+// 매도 등록 시 보유수량(QTY)에서 매도수량만큼 자동 차감(addSellRecord/delSellRecord에서 처리) — 평가금액 계산이
+// 남은 수량만 반영하도록. 단, "메인 목록/종목수에서 뺄지"는 보유수량 수치를 추정해서 판단하지 않고(사람마다
+// 보유수량을 정확히 입력해뒀는지 여부가 달라 추정이 어긋나기 쉬움), 매도 관리 창의 "전량매도 완료 처리"
+// 버튼으로 사용자가 직접 명확하게 표시한 종목만 뺀다 — 훨씬 확실하고 예측 가능함.
+const KCLOSED='srk_closed_v1';
+const loadClosed=()=>{try{return new Set(JSON.parse(localStorage.getItem(KCLOSED)||'[]'));}catch{return new Set();}};
+const saveClosed=set=>{localStorage.setItem(KCLOSED,JSON.stringify([...set]));scheduleSync();};
 const soldQty = code => (loadSell()[code]||[]).reduce((s,r)=>s+(r.qty||0),0);
-const isFullySold = code => { const q=loadQty()[code]||0; return soldQty(code) > 0 && q <= 0; };
+const isFullySold = code => loadClosed().has(code);
 
 /* ══ 상태 ══ */
 let STOCKS = loadStocks(), BP = loadBP(), QTY = loadQty(), DT = loadDt(), MEMO = loadMemo(), SELL = loadSell();
@@ -990,6 +995,7 @@ async function pushPortfolio() {
     watch: loadWatch(),
     hist: _hist,
     del: [...loadDeleted()],  // 삭제한 기본(DFLT) 종목 코드 — 다른 기기에서도 되살아나지 않게 함께 동기화
+    closed: [...loadClosed()], // "전량매도 완료 처리"한 종목 코드 — 다른 기기에서도 목록/종목수에서 함께 제외
     ts: Date.now()
   };
   const body = JSON.stringify(payload);
@@ -1041,6 +1047,12 @@ async function pullPortfolio() {
       const del = loadDeleted();
       data.del.forEach(c=>del.add(c));
       saveDeleted(del);
+    }
+    // 다른 기기에서 "전량매도 완료 처리"한 종목도 병합 (합집합 — 한쪽에서 되돌리기 전까진 유지)
+    if (Array.isArray(data.closed) && data.closed.length) {
+      const closed = loadClosed();
+      data.closed.forEach(c=>closed.add(c));
+      localStorage.setItem(KCLOSED, JSON.stringify([...closed]));
     }
     // 삭제 push가 서버에 반영되기 전에 재시작/새로고침되는 등의 타이밍 문제로
     // 서버가 아직 삭제된 종목을 들고 있을 수 있음 → 로컬이 알고 있는 삭제 목록으로 한 번 더 걸러내
@@ -3017,6 +3029,7 @@ function openSell(code){
   document.getElementById('sellQty').value = '';
   document.getElementById('sellPrice').value = '';
   renderSellList();
+  renderSellClosedBtn();
   document.getElementById('sellModal').classList.add('open');
 }
 function closeSell(){
@@ -3024,6 +3037,21 @@ function closeSell(){
   _sellCode = null;
 }
 function sellModalBgTap(e){ if(e.target===document.getElementById('sellModal')) closeSell(); }
+function renderSellClosedBtn(){
+  const btn=document.getElementById('btnSellClosed');
+  if(!btn||!_sellCode) return;
+  const closed=loadClosed().has(_sellCode);
+  btn.textContent = closed ? '↩️ 보유중으로 되돌리기' : '✅ 전량매도 완료 처리';
+  btn.style.opacity = closed ? '0.55' : '1';
+}
+function toggleSellClosed(){
+  if(!_sellCode) return;
+  const set=loadClosed();
+  if(set.has(_sellCode)) set.delete(_sellCode); else set.add(_sellCode);
+  saveClosed(set);
+  renderSellClosedBtn();
+  render(); updSum();   // 메인 목록/종목수에 즉시 반영
+}
 
 function renderSellList(){
   if(!_sellCode) return;
