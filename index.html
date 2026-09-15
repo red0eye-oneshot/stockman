@@ -948,10 +948,11 @@ const loadMemo= () => {try{return JSON.parse(localStorage.getItem(KM)||'{}');}ca
 const saveMemo= (c,k,v) => {const m=loadMemo();if(!m[c])m[c]={};if(v)m[c][k]=v;else delete m[c][k];if(!Object.keys(m[c]).length)delete m[c];localStorage.setItem(KM,JSON.stringify(m));};
 const loadSell= () => {try{return JSON.parse(localStorage.getItem(KSL)||'{}');}catch{return {};}};
 const saveSell= (c,arr) => {const m=loadSell();if(arr&&arr.length)m[c]=arr;else delete m[c];localStorage.setItem(KSL,JSON.stringify(m));scheduleSync();};
-// 종목별 누적 매도수량이 보유수량 이상이면 "전량매도"로 보고 메인 목록/종목수에서 자동 제외.
-// (보유수량을 입력 안 한 종목은 제외 대상에서 빠짐 — 실수로 사라지는 것 방지)
+// 매도 등록 시 보유수량(QTY)에서 매도수량만큼 자동 차감(addSellRecord/delSellRecord에서 처리).
+// 매도기록이 1건 이상 있고 남은 보유수량이 0 이하이면 "전량매도"로 보고 메인 목록/종목수에서 자동 제외.
+// (매도 등록을 한 번도 안 한 종목은 QTY를 안 채워넣었어도 절대 숨겨지지 않음 — 실수 방지)
 const soldQty = code => (loadSell()[code]||[]).reduce((s,r)=>s+(r.qty||0),0);
-const isFullySold = code => { const q=loadQty()[code]; return !!q && soldQty(code) >= q; };
+const isFullySold = code => { const q=loadQty()[code]||0; return soldQty(code) > 0 && q <= 0; };
 
 /* ══ 상태 ══ */
 let STOCKS = loadStocks(), BP = loadBP(), QTY = loadQty(), DT = loadDt(), MEMO = loadMemo(), SELL = loadSell();
@@ -3045,7 +3046,8 @@ function renderSellList(){
   }).join('');
   const totQty=list.reduce((s,r)=>s+(r.qty||0),0);
   const totAmt=list.reduce((s,r)=>s+(r.qty||0)*(r.price||0),0);
-  document.getElementById('sellSummary').textContent=`총 ${totQty.toLocaleString('ko-KR')}주 · ${totAmt.toLocaleString('ko-KR')}원`;
+  const remain=loadQty()[_sellCode]||0;
+  document.getElementById('sellSummary').textContent=`총 ${totQty.toLocaleString('ko-KR')}주 매도 · ${totAmt.toLocaleString('ko-KR')}원 · 잔여 보유 ${remain.toLocaleString('ko-KR')}주`;
 }
 
 function addSellRecord(){
@@ -3061,6 +3063,11 @@ function addSellRecord(){
   all[_sellCode].push({id:Date.now()+'_'+Math.random().toString(36).slice(2,7), date, qty, price});
   saveSell(_sellCode, all[_sellCode]);
   SELL=loadSell();
+  // 매도수량만큼 보유수량(QTY) 자동 차감 (0 밑으로는 안 내려감) → 전량매도 시 종목수가 즉시 정리됨.
+  // 보유수량을 따로 입력해둔 적이 없어도 매도 등록 수량 자체가 기준이 되므로 항상 정확히 반영됨.
+  const curQty=loadQty()[_sellCode]||0;
+  saveQty(_sellCode, Math.max(0, curQty-qty));
+  QTY=loadQty();
   document.getElementById('sellQty').value='';
   document.getElementById('sellPrice').value='';
   renderSellList();
@@ -3070,9 +3077,16 @@ function addSellRecord(){
 function delSellRecord(id){
   if(!_sellCode) return;
   const all=loadSell();
+  const rec=(all[_sellCode]||[]).find(r=>r.id===id);
   all[_sellCode]=(all[_sellCode]||[]).filter(r=>r.id!==id);
   saveSell(_sellCode, all[_sellCode]);
   SELL=loadSell();
+  // 매도기록을 지우면 그만큼 보유수량을 복원 (되돌리기)
+  if(rec && rec.qty){
+    const curQty=loadQty()[_sellCode]||0;
+    saveQty(_sellCode, curQty+rec.qty);
+    QTY=loadQty();
+  }
   renderSellList();
   render(); updSum();   // 매도기록 삭제로 다시 보유수량이 남으면 종목수에 즉시 복원
 }
