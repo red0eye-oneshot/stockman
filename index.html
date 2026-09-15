@@ -2306,7 +2306,26 @@ async function addStock(){
   // 증권사가 다르면 별도 보유(매수단가·수량 독립)로 추가하고, 같은 증권사면 중복으로 막음.
   const sameStock = STOCKS.filter(s => (s.realCode||s.code) === rawCode);
   const sameBrokerDup = sameStock.find(s => (s.brkr||'').trim() === (brkr||'').trim());
-  if(sameBrokerDup){ msgEl.textContent='이미 추가된 종목코드입니다.'; msgEl.style.display='block'; return; }
+  if(sameBrokerDup){
+    // 종목관리에는 이미 있지만 "전량매도 완료 처리"돼서 메인 목록에 안 보이는 상태일 수 있음.
+    // 이 경우 사용자가 "다시 추가"하려는 시도는 사실상 "다시 보유중으로 되돌려줘"라는 뜻이므로,
+    // 에러로 막지 말고 처리 목록에서 자동으로 빼서 되살려준다.
+    const closed=loadClosed();
+    let revived=false;
+    if(closed.has(sameBrokerDup.code)){ closed.delete(sameBrokerDup.code); revived=true; }
+    if(closed.has(rawCode)){ closed.delete(rawCode); revived=true; }
+    if(revived){
+      saveClosed(closed);
+      msgEl.style.color='#22c55e';
+      msgEl.textContent=`"${sameBrokerDup.name}"의 전량매도 완료 처리를 해제하고 다시 보유중으로 전환했습니다.`;
+      msgEl.style.display='block';
+      nameEl.value=''; codeEl.value=''; brkrEl.value='';
+      renderMList(); render(); updSum();
+    } else {
+      msgEl.textContent='이미 추가된 종목코드입니다.'; msgEl.style.display='block';
+    }
+    return;
+  }
 
   const newEntry = {name, code: rawCode, brkr};
   if(sameStock.length){
@@ -2327,12 +2346,19 @@ async function addStock(){
   if(del.has(rawCode)){ del.delete(rawCode); delChanged=true; }
   if(del.has(newEntry.code)){ del.delete(newEntry.code); delChanged=true; }
   if(delChanged) saveDeleted(del);
+  // "전량매도 완료 처리"했던 종목을 다시 추가한 경우도 동일하게 처리 목록에서 제외해야
+  // 재등록해도 메인 목록에 안 보이는 문제가 생기지 않는다 (rawCode·접미사 코드 둘 다 확인).
+  const closed=loadClosed();
+  let closedChanged=false;
+  if(closed.has(rawCode)){ closed.delete(rawCode); closedChanged=true; }
+  if(closed.has(newEntry.code)){ closed.delete(newEntry.code); closedChanged=true; }
+  if(closedChanged) saveClosed(closed);
   nameEl.value=''; codeEl.value=''; brkrEl.value='';
   msgEl.style.display='none';
   renderMList();
   // 새 종목만 즉시 조회
   const newS = STOCKS[STOCKS.length-1];
-  loadOne(newS).then(()=>{ updSum(); });
+  loadOne(newS).then(()=>{ render(); updSum(); });   // 메인 목록에도 바로 반영
 }
 
 /* ══ 내보내기 ══
