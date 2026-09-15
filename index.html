@@ -792,7 +792,8 @@ if ('serviceWorker' in navigator) {
     </div>
     <div class="memo-foot">
       <button class="memo-del" id="btnSellClosed" onclick="toggleSellClosed()" style="flex:1">전량매도 완료 처리</button>
-      <button class="memo-cancel" style="margin-left:auto" onclick="closeSell()">닫기</button>
+      <button class="memo-save" id="btnSellSave" onclick="saveSellChanges()" style="flex:1;width:auto">저장</button>
+      <button class="memo-cancel" onclick="closeSell()">닫기</button>
     </div>
   </div>
 </div>
@@ -2005,7 +2006,12 @@ function brkrHdr(nm,st){
 }
 function render() {
   const ae=document.activeElement;
-  if(ae?.classList.contains('bi')||ae?.classList.contains('bi-date')||ae?.classList.contains('memo-price-inp'))return;
+  // 메인 카드 목록의 인라인 입력칸(id가 "bi-code"/"qi-code"/"di-code" 형태)에 타이핑 중일 때만
+  // 렌더링을 건너뜀(포커스 뺏김 방지). 매도 관리 모달의 날짜/수량/매도가 입력칸도 같은 CSS 클래스를
+  // 재사용하고 있어서 예전엔 클래스명만으로 판단했는데, 그러면 매도 모달에서 입력 중일 때도
+  // 메인 목록 갱신이 막혀서 "매도 등록해도 반영 안 됨" 문제의 원인이 됐다. id 접두사로 더 정확히 구분.
+  if(ae?.id && (ae.id.startsWith('bi-')||ae.id.startsWith('qi-')||ae.id.startsWith('di-')))return;
+  if(ae?.classList.contains('memo-price-inp'))return;
   BP=loadBP(); MEMO=loadMemo(); SELL=loadSell();
   renderBrkrQuickbar();
   if(!Object.keys(D).length){
@@ -3077,6 +3083,25 @@ function toggleSellClosed(){
   saveClosed(set);
   renderSellClosedBtn();
   render(); updSum();   // 메인 목록/종목수에 즉시 반영
+}
+/* 매도 관리 모달의 "저장" 버튼 — 매도 기록 추가/삭제·전량매도 처리는 이미 각자 즉시 반영되지만,
+   입력칸에 포커스가 남아있는 등의 이유로 화면 갱신이 씹히는 경우를 막기 위해 확실하게
+   한 번 더 강제로 반영 + 서버 동기화까지 즉시 실행하고 결과를 눈으로 확인시켜준다. */
+async function saveSellChanges(){
+  const btn=document.getElementById('btnSellSave');
+  if(!btn) return;
+  document.activeElement?.blur();   // 입력칸 포커스가 남아 render()가 건너뛰어지는 일 방지
+  const orig='저장';
+  btn.disabled=true; btn.textContent='저장 중...';
+  if(_syncTimer){ clearTimeout(_syncTimer); _syncTimer=null; }
+  render(); updSum();
+  try{
+    await pushPortfolio();
+    btn.textContent='✓ 저장됨';
+  }catch(e){
+    btn.textContent='❌ 실패';
+  }
+  setTimeout(()=>{ btn.disabled=false; btn.textContent=orig; }, 1500);
 }
 
 function renderSellList(){
