@@ -930,6 +930,59 @@ def _fetch_mstock_json(url: str, dbg_key: str):
         _log(f"  [지수ERR] mstock {dbg_key}: {type(e).__name__}: {e}")
         return None, None, None
 
+def _extract_realtime_datum(j):
+    """polling.finance.naver.com 응답에서 실제 시세가 담긴 dict 하나를 최대한 유연하게 찾아냄.
+       네이버가 종종 중첩 구조를 바꿔서(datas 최상위 / result.areas[0].datas / result.datas 등)
+       여러 형태를 다 시도. closePrice류 키가 하나라도 있으면 그 dict를 실제 시세로 판단."""
+    def _has_price_key(d):
+        return isinstance(d, dict) and any(k in d for k in
+            ('closePrice','now','nowValue','indexValue','currentValue','tradePrice','stockEndPrice'))
+    candidates = []
+    if isinstance(j, list) and j:
+        candidates.append(j[0])
+    if isinstance(j, dict):
+        if isinstance(j.get('datas'), list) and j['datas']:
+            candidates.append(j['datas'][0])
+        res = j.get('result')
+        if isinstance(res, dict):
+            areas = res.get('areas')
+            if isinstance(areas, list) and areas and isinstance(areas[0], dict):
+                d0 = areas[0].get('datas')
+                if isinstance(d0, list) and d0:
+                    candidates.append(d0[0])
+            if isinstance(res.get('datas'), list) and res['datas']:
+                candidates.append(res['datas'][0])
+            candidates.append(res)
+        elif isinstance(res, list) and res:
+            candidates.append(res[0])
+        candidates.append(j)
+    for c in candidates:
+        if _has_price_key(c):
+            return c
+    return None
+
+def _fetch_polling_realtime(url: str, dbg_key: str):
+    """polling.finance.naver.com/api/realtime/... 공통 시도 (m.stock API가 세계지수/환율에서
+       400/404로 막힌 뒤 대체용으로 추가한 네이버의 또 다른 실시간 시세 API).
+       성공 시 (val, chg, pct) / 실패 시 (None, None, None)."""
+    try:
+        r = SESSION.get(url, headers=HEADERS, timeout=8)
+        if r.status_code != 200:
+            _mkt_log_once(dbg_key, f"  [지수디버그] polling {dbg_key} HTTP {r.status_code} url={url}")
+            return None, None, None
+        j = r.json()
+        _mkt_log_once(dbg_key + '_raw', f"  [지수디버그] polling {dbg_key} raw={str(j)[:600]}")
+        d = _extract_realtime_datum(j)
+        if not d:
+            return None, None, None
+        val = _mstock_num_from(d, ('closePrice','now','nowValue','indexValue','currentValue','tradePrice','stockEndPrice'))
+        chg = _mstock_num_from(d, ('compareToPreviousClosePrice','changeValue','fluctuations','changePrice'))
+        pct = _mstock_num_from(d, ('fluctuationsRatio','changeRate','risingRate','fluctuationsRate'))
+        return val, chg, pct
+    except Exception as e:
+        _log(f"  [지수ERR] polling {dbg_key}: {type(e).__name__}: {e}")
+        return None, None, None
+
 def fetch_domestic_index(code: str, key: str) -> dict:
     """코스피/코스닥 실시간 지수 (모바일 JSON API 우선 → 실패 시 HTML 페이지 백업)"""
     out = {key: {'value': None, 'change': None, 'changePct': None, 'ok': False}}
@@ -953,11 +1006,52 @@ def fetch_domestic_index(code: str, key: str) -> dict:
         _log(f"  [지수ERR] domestic {key}: {type(e).__name__}: {e}")
     return out
 
+def _fetch_marketindex_prices(reuters_code: str, dbg_key: str):
+    """m.stock.naver.com의 신형 front-api (2026년 리뉴얼 이후 환율 데이터가 옮겨간 것으로 보이는 경로).
+       기존 /api/marketindex/exchange/... 가 계속 404가 나서 대체용으로 추가."""
+    try:
+        url = (f"https://m.stock.naver.com/front-api/v1/marketIndex/prices"
+               f"?category=exchange&reutersCode={reuters_code}&page=1&pageSize=1")
+        r = SESSION.get(url, headers=HEADERS, timeout=8)
+        if r.status_code != 200:
+            _mkt_log_once(dbg_key, f"  [지수디버그] marketIndex {dbg_key} HTTP {r.status_code} url={url}")
+            return None, None, None
+        j = r.json()
+        _mkt_log_once(dbg_key + '_raw', f"  [지수디버그] marketIndex {dbg_key} raw={str(j)[:600]}")
+        result = j.get('result')
+        first = None
+        if isinstance(result, list) and result:
+            first = result[0]
+        elif isinstance(result, dict):
+            for v in result.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    first = v[0]; break
+        if not isinstance(first, dict):
+            return None, None, None
+        val = _mstock_num_from(first, ('closePrice', 'value'))
+        chg = _mstock_num_from(first, ('compareToPreviousClosePrice', 'fluctuations', 'changeValue'))
+        pct = _mstock_num_from(first, ('fluctuationsRatio', 'changeRate'))
+        return val, chg, pct
+    except Exception as e:
+        _log(f"  [지수ERR] marketIndex {dbg_key}: {type(e).__name__}: {e}")
+        return None, None, None
+
 def fetch_exchange_rate() -> dict:
-    """달러/원 환율 (모바일 JSON API 우선 → 실패 시 HTML 페이지 백업)"""
+    """달러/원 환율 (모바일 JSON API 우선 → 실패 시 HTML 페이지 백업).
+       네이버 개편 이후 기존 /api/marketindex/exchange 경로가 404가 나서, 대체 경로 두 개를 더 시도한다."""
     out = {'usdkrw': {'value': None, 'change': None, 'changePct': None, 'ok': False}}
 
     val, chg, pct = _fetch_mstock_json("https://m.stock.naver.com/api/marketindex/exchange/FX_USDKRW", 'fx')
+    if val is not None:
+        out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+        return out
+
+    val, chg, pct = _fetch_polling_realtime("https://polling.finance.naver.com/api/realtime/marketindicator/FX_USDKRW", 'fx_poll')
+    if val is not None:
+        out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+        return out
+
+    val, chg, pct = _fetch_marketindex_prices("FX_USDKRW", 'fx_mip')
     if val is not None:
         out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
         return out
@@ -999,11 +1093,12 @@ def fetch_btc() -> dict:
 # 해외지수 심볼 후보 (네이버 world 페이지 기준) + 실패 시 목록 페이지에서 자동 탐색할 검색어
 WORLD_SYMS = {
     'nasdaq': {'symbols': ['NAS@IXIC'],                        'discover': '나스닥종합',
-               'mstock': ['.IXIC', 'IXIC']},
+               'mstock': ['.IXIC', 'IXIC'],                    'polling': ['.IXIC', 'NAS@IXIC']},
     'sp500':  {'symbols': ['SPI@SPX'],                         'discover': 'S&amp;P500',
-               'mstock': ['.INX', '.SPX', 'SPX']},
+               'mstock': ['.INX', '.SPX', 'SPX'],              'polling': ['.SPX', 'SPI@SPX']},
     'vix':    {'symbols': ['CBO@VIX', 'CBOE@VIX'],             'discover': 'VIX',
                'mstock': ['.VIX', 'VIX'],                      'stooq': '^vix',
+               'polling': ['.VIX', 'CBO@VIX'],
                'tradingview': 'CBOE:VIX'},
 }
 
@@ -1092,6 +1187,14 @@ def _discover_world_symbol(search_text: str):
 def fetch_world_index(key: str, cfg: dict) -> dict:
     """해외지수: 모바일 JSON API 우선 시도 → 실패 시 world 시세 페이지 HTML 스크래핑(심볼 후보 순차 → 자동 탐색)"""
     out = {key: {'value': None, 'change': None, 'changePct': None, 'ok': False}}
+
+    # 네이버 개편 이후 기존 /api/index/{code}/basic 이 세계지수에서 계속 400이 나서,
+    # 폴링(실시간) API를 먼저 시도 — 이게 현재 네이버 앱이 실제로 쓰는 걸로 보이는 경로.
+    for pcode in cfg.get('polling', []):
+        val, chg, pct = _fetch_polling_realtime(f"https://polling.finance.naver.com/api/realtime/worldstock/index/{pcode}", f"{key}_poll")
+        if val is not None:
+            out[key] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+            return out
 
     for mcode in cfg.get('mstock', []):
         val, chg, pct = _fetch_mstock_json(f"https://m.stock.naver.com/api/index/{mcode}/basic", f"{key}_m")
