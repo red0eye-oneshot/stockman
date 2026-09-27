@@ -1036,6 +1036,43 @@ def _fetch_marketindex_prices(reuters_code: str, dbg_key: str):
         _log(f"  [지수ERR] marketIndex {dbg_key}: {type(e).__name__}: {e}")
         return None, None, None
 
+def _fetch_frankfurter_fx():
+    """ECB 기준 USD/KRW 환율 (frankfurter.app - 무료·인증 불필요·안정적인 공개 API).
+       네이버 쪽 환율 경로가 전부(4가지나) 막혔을 때의 최종 대안. 네이버의 실시간 시장환율이
+       아니라 ECB 기준환율(평일 16:00 CET 갱신, 주말엔 금요일자 값 유지)이라 몇 원 정도
+       차이날 수 있지만, 최소한 "—"로 안 뜨고 대략적인 환율/등락은 보여줄 수 있음."""
+    try:
+        r = SESSION.get("https://api.frankfurter.app/latest?from=USD&to=KRW", timeout=8)
+        if r.status_code != 200:
+            _mkt_log_once('fx_frank', f"  [지수디버그] frankfurter FX HTTP {r.status_code}")
+            return None, None, None
+        j = r.json()
+        today = j.get('date')
+        val = _mkt_num((j.get('rates') or {}).get('KRW'))
+        if val is None:
+            val = _mkt_num(j.get('rate'))  # v2 스타일 응답 대비
+        if val is None:
+            return None, None, None
+        chg = pct = None
+        try:
+            if today:
+                prev_day = (datetime.strptime(today, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
+                r2 = SESSION.get(f"https://api.frankfurter.app/{prev_day}..{today}?from=USD&to=KRW", timeout=6)
+                if r2.status_code == 200:
+                    rates_map = (r2.json() or {}).get('rates') or {}
+                    dates = sorted(rates_map.keys())
+                    if len(dates) >= 2:
+                        prev_val = _mkt_num((rates_map[dates[0]] or {}).get('KRW'))
+                        if prev_val:
+                            chg = val - prev_val
+                            pct = chg / prev_val * 100
+        except Exception:
+            pass  # 전일 대비 계산 실패해도 현재값은 살림
+        return val, chg, pct
+    except Exception as e:
+        _log(f"  [지수ERR] frankfurter FX: {type(e).__name__}: {e}")
+        return None, None, None
+
 def fetch_exchange_rate() -> dict:
     """달러/원 환율 (모바일 JSON API 우선 → 실패 시 HTML 페이지 백업).
        네이버 개편 이후 기존 /api/marketindex/exchange 경로가 404가 나서, 대체 경로 두 개를 더 시도한다."""
@@ -1046,10 +1083,14 @@ def fetch_exchange_rate() -> dict:
         out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
         return out
 
-    val, chg, pct = _fetch_polling_realtime("https://polling.finance.naver.com/api/realtime/marketindicator/FX_USDKRW", 'fx_poll')
-    if val is not None:
-        out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
-        return out
+    for fx_url, fx_key in (
+        ("https://polling.finance.naver.com/api/realtime/marketindicator/FX_USDKRW", 'fx_poll'),
+        ("https://polling.finance.naver.com/api/realtime/marketindicator/exchange/FX_USDKRW", 'fx_poll2'),
+    ):
+        val, chg, pct = _fetch_polling_realtime(fx_url, fx_key)
+        if val is not None:
+            out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+            return out
 
     val, chg, pct = _fetch_marketindex_prices("FX_USDKRW", 'fx_mip')
     if val is not None:
@@ -1066,8 +1107,14 @@ def fetch_exchange_rate() -> dict:
                                       f"len={len(html)} snippet={_clean_snippet(html)}")
         else:
             out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
+            return out
     except Exception as e:
         _log(f"  [지수ERR] FX: {type(e).__name__}: {e}")
+
+    # 네이버 쪽 경로 4개가 전부 실패한 경우의 최종 대안 — 안정적인 무료 공개 API
+    val, chg, pct = _fetch_frankfurter_fx()
+    if val is not None:
+        out['usdkrw'] = {'value': val, 'change': chg, 'changePct': pct, 'ok': True}
     return out
 
 def fetch_btc() -> dict:
@@ -1095,7 +1142,7 @@ WORLD_SYMS = {
     'nasdaq': {'symbols': ['NAS@IXIC'],                        'discover': '나스닥종합',
                'mstock': ['.IXIC', 'IXIC'],                    'polling': ['.IXIC', 'NAS@IXIC']},
     'sp500':  {'symbols': ['SPI@SPX'],                         'discover': 'S&amp;P500',
-               'mstock': ['.INX', '.SPX', 'SPX'],              'polling': ['.SPX', 'SPI@SPX']},
+               'mstock': ['.INX', '.SPX', 'SPX'],              'polling': ['.INX', '.SPX', 'SPI@SPX']},
     'vix':    {'symbols': ['CBO@VIX', 'CBOE@VIX'],             'discover': 'VIX',
                'mstock': ['.VIX', 'VIX'],                      'stooq': '^vix',
                'polling': ['.VIX', 'CBO@VIX'],
@@ -1281,14 +1328,19 @@ def fetch_market_indices() -> dict:
     for key, syms in WORLD_SYMS.items():
         futs[ex.submit(fetch_world_index, key, syms)] = key
 
+    # 주의: 예전엔 이 내부 대기시간이 프론트엔드 fetch의 abort 시간(15초)과 똑같았음.
+    # 서버가 15초를 꽉 채워서 응답하면 그 사이 클라이언트가 이미 요청을 중단해버려서
+    # 응답 자체를 못 받고(= renderMktTicker가 아예 호출 안 됨) 지수 바 전체가 사라지는
+    # 문제가 있었음. 오늘 폴백 경로를 추가하면서 지연이 조금 더 늘어나 이 경합이 더 자주
+    # 발생한 것으로 보임 — 내부 대기를 10초로 줄여서 프론트(20초)보다 확실히 먼저 끝나게 함.
     try:
-        for fut in as_completed(futs, timeout=15):
+        for fut in as_completed(futs, timeout=10):
             try:
                 result.update(fut.result(timeout=1) or {})
             except Exception as e:
                 _log(f"  [지수ERR] {futs.get(fut)}: {type(e).__name__}: {e}")
     except FutureTimeoutError:
-        _log("  [지수ERR] market_indices 전체 15초 타임아웃 - 완료된 것만 반영")
+        _log("  [지수ERR] market_indices 전체 10초 타임아웃 - 완료된 것만 반영")
 
     with _mkt_lock:
         _mkt_cache['data'] = result

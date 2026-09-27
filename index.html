@@ -1349,8 +1349,12 @@ async function detectServer() {
   if(isLocalSrv){ SRV=''; return true; }
 
   // 1) 저장된 서버 주소
+  // 저장된 주소가 클라우드(Render) 기본값과 같으면 아래 2단계와 똑같은 요청을 또 보내는
+  // 셈이라, 실패 시(네트워크 순단 등) 최악의 경우 Render 콜드스타트 대기(최대 90초)를
+  // 두 번 연달아 하게 됨. 같은 주소면 바로 2단계로 건너뛰어서 대기 시간이 배로 늘어나는
+  // 걸 막는다 — "폰에서 실행이 너무 늦다"는 문제의 원인 중 하나.
   const savedUrl = localStorage.getItem(KSRV);
-  if(savedUrl) {
+  if(savedUrl && savedUrl !== CLOUD_SRV) {
     try {
       const ctrl=new AbortController(); setTimeout(()=>ctrl.abort(),90000);
       setSplashMsg('저장된 서버 연결 중...');
@@ -1363,7 +1367,7 @@ async function detectServer() {
   const defaultUrl = CLOUD_SRV;
   try {
     const ctrl=new AbortController(); setTimeout(()=>ctrl.abort(),90000);
-    setSplashMsg('Render 클라우드 서버 연결 중...');
+    setSplashMsg('Render 클라우드 서버 연결 중... (잠들어 있으면 깨우는 데 최대 1분 정도 걸릴 수 있어요)');
     const r = await apiFetch(defaultUrl+'/api/ping',{signal:ctrl.signal});
     if(r.ok){ SRV=defaultUrl; return true; }
   } catch {}
@@ -3194,7 +3198,10 @@ function fmtMktChg(key, chg, pct){
 
 async function loadMarketIndices(){
   try{
-    const ctrl = new AbortController(); setTimeout(()=>ctrl.abort(), 15000);
+    // 서버 내부 대기시간(10초)보다 확실히 여유 있게: 예전엔 여기 15초 = 서버 내부 15초로
+    // 완전히 같아서, 서버가 시간을 꽉 채워 응답하면 그 사이 클라이언트가 이미 요청을
+    // 끊어버려 지수 바 전체가 안 보이는 문제가 있었음.
+    const ctrl = new AbortController(); setTimeout(()=>ctrl.abort(), 20000);
     const r = await apiFetch(`${SRV}/api/market_indices`, {signal: ctrl.signal});
     if(!r.ok) return;
     const j = await r.json();
