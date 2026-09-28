@@ -3310,8 +3310,16 @@ function startHeartbeat(){
 let _autoRefreshTimer = null;
 function startAutoRefresh(){
   if(_autoRefreshTimer) clearInterval(_autoRefreshTimer);
-  _autoRefreshTimer = setInterval(() => {
+  _autoRefreshTimer = setInterval(async () => {
     if(document.hidden) return;
+    // 종목 목록 자체(다른 기기에서 새로 추가/삭제한 종목 등)는 원래 앱을 새로 켤 때만
+    // pullPortfolio()로 받아왔음 — 그래서 PC에서 종목을 추가해도 폰 앱을 이미 켜둔 상태면
+    // 완전히 껐다 켜기 전까진 반영이 안 됐음. 가격 갱신 주기에 같이 끼워서 종목 목록도
+    // 주기적으로 다시 받아오게 함.
+    try{
+      await pullPortfolio();
+      STOCKS=loadStocks(); BP=loadBP(); QTY=loadQty(); DT=loadDt(); MEMO=loadMemo(); WATCH=loadWatch();
+    }catch(e){ /* 풀 실패해도 가격 갱신은 계속 진행 */ }
     if(!busy) start();
     loadMarketIndices();
   }, 5 * 60 * 1000);
