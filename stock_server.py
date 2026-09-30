@@ -66,6 +66,19 @@ try:
 except Exception:
     OPENPYXL = False
 
+try:
+    from reportlab.pdfgen import canvas as _rl_canvas
+    from reportlab.lib.pagesizes import A4 as _RL_A4
+    from reportlab.pdfbase import pdfmetrics as _rl_pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont as _RL_UnicodeCIDFont
+    _rl_pdfmetrics.registerFont(_RL_UnicodeCIDFont('HYSMyeongJo-Medium'))
+    REPORTLAB = True
+except Exception:
+    REPORTLAB = False
+
+import smtplib
+from email.message import EmailMessage
+
 # ── 설정 ────────────────────────────────────────────────
 PORT          = int(os.environ.get('PORT', 5555))   # Render는 환경변수로 PORT 지정
 CACHE_TTL     = 60    # 장중 캐시 유효시간(초) — 빠른 실시간 갱신
@@ -84,6 +97,22 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
             _tg_cfg = json.load(_tf)
         TELEGRAM_TOKEN   = TELEGRAM_TOKEN   or _tg_cfg.get('bot_token', '')
         TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or _tg_cfg.get('chat_id', '')
+    except Exception:
+        pass
+
+# ── 이메일 (일일 분석 엑셀/PDF 자동 발송) ──────────────────
+# 보안: 앱 비밀번호를 소스에 직접 적지 않음 → 환경변수(Render 배포용) 우선,
+# 없으면 로컬 email_config.json(.gitignore 처리, 깃허브에 올라가지 않음)에서 읽음.
+EMAIL_USER     = os.environ.get('EMAIL_USER', '')          # 보내는 계정 (Gmail 주소)
+EMAIL_APP_PASS = os.environ.get('EMAIL_APP_PASSWORD', '')  # Gmail 앱 비밀번호(16자리)
+EMAIL_TO       = os.environ.get('EMAIL_TO', '')            # 받는 주소
+if not EMAIL_USER or not EMAIL_APP_PASS:
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'email_config.json'), 'r', encoding='utf-8') as _ef:
+            _em_cfg = json.load(_ef)
+        EMAIL_USER     = EMAIL_USER     or _em_cfg.get('smtp_user', '')
+        EMAIL_APP_PASS = EMAIL_APP_PASS or _em_cfg.get('smtp_app_password', '')
+        EMAIL_TO       = EMAIL_TO       or _em_cfg.get('to_email', '')
     except Exception:
         pass
 
@@ -2048,6 +2077,248 @@ def build_daily_report() -> str:
     return "\n".join(parts)
 
 
+# ════════════════════════════════════════════════════════
+# 일일 종합분석 엑셀/PDF 자동 생성 + 이메일 발송
+# ════════════════════════════════════════════════════════
+
+_CODE_ALIAS = {}  # 예: '060280A' -> '060280' (실제 코드가 다른 별칭 보유분)
+
+def _score_row(today_pct, frgn, pnl_pct, has_div) -> float:
+    s = 0.0
+    if today_pct is None: today_pct = 0
+    if today_pct >= 3: s += 2
+    elif today_pct >= 0: s += 1
+    elif today_pct > -3: s -= 1
+    else: s -= 2
+    if frgn is not None:
+        if frgn >= 20: s += 1
+        elif frgn >= 5: s += 0.5
+        else: s -= 0.5
+    if has_div: s += 0.5
+    if pnl_pct is not None:
+        if pnl_pct <= -40: s -= 1.5
+        elif pnl_pct <= -15: s -= 0.5
+        elif pnl_pct >= 0: s += 1
+    return s
+
+def _bucket_of(score: float) -> str:
+    if score >= 2: return "상승 흐름 기대"
+    if score >= 0: return "유지/관망"
+    if score >= -2: return "리스크 관리 필요"
+    return "보수적 접근 권고"
+
+def collect_analysis_rows():
+    """보유종목(bp/qty 기준 실제 잔량) + 관심종목을 조회해 종합분석 행 데이터를 만든다."""
+    pf = load_portfolio()
+    stocks = pf.get('stocks', []) or []
+    bp_map = pf.get('bp', {}) or {}
+    qty_map = pf.get('qty', {}) or {}
+    watch = pf.get('watch', []) or []
+
+    name_map, brkr_map = {}, {}
+    for s in stocks:
+        name_map[s['code']] = s.get('name', s['code'])
+        brkr_map[s['code']] = s.get('brkr', '')
+        if s.get('realCode'):
+            _CODE_ALIAS[s['code']] = s['realCode']
+
+    held_codes = [c for c in bp_map.keys() if qty_map.get(c)]
+    real_codes = {_CODE_ALIAS.get(c, c) for c in held_codes}
+    watch_only = [c for c in watch if c not in real_codes and c not in held_codes]
+
+    all_real = list(real_codes | set(watch_only))
+    ex = _shared_pool
+    futs = {c: ex.submit(get_stock_data, c) for c in all_real}
+    data_map = {}
+    for c, f in futs.items():
+        try:
+            data_map[c] = f.result(timeout=15)
+        except Exception as e:
+            _log(f"[종합분석] get_stock_data({c}) 실패: {e}")
+            data_map[c] = {'ok': False}
+
+    rows = []
+    for code in held_codes:
+        buy = bp_map.get(code)
+        qty = qty_map.get(code)
+        if not buy or not qty:
+            continue
+        real = _CODE_ALIAS.get(code, code)
+        d = data_map.get(real, {}) or {}
+        px = d.get('px')
+        if px is None:
+            continue
+        prev = d.get('prevClose') or px
+        pnl_pct = (px - buy) / buy * 100
+        today_pct = (px - prev) / prev * 100 if prev else 0
+        frgn = d.get('frgnRatio')
+        has_div = bool(d.get('dividend'))
+        score = _score_row(today_pct, frgn, pnl_pct, has_div)
+        rows.append({
+            'name': name_map.get(code, real), 'code': real, 'brkr': brkr_map.get(code, ''),
+            'buy': buy, 'qty': qty, 'px': px, 'pnl_pct': pnl_pct, 'today_pct': today_pct,
+            'frgn': frgn, 'has_div': has_div, 'score': score, 'bucket': _bucket_of(score),
+        })
+    rows.sort(key=lambda r: -r['score'])
+
+    wrows = []
+    for code in watch_only:
+        d = data_map.get(code, {}) or {}
+        px = d.get('px')
+        if px is None:
+            continue
+        prev = d.get('prevClose') or px
+        today_pct = (px - prev) / prev * 100 if prev else 0
+        frgn = d.get('frgnRatio')
+        has_div = bool(d.get('dividend'))
+        score = _score_row(today_pct, frgn, None, has_div)
+        wrows.append({
+            'name': d.get('name', code), 'code': code, 'px': px, 'today_pct': today_pct,
+            'frgn': frgn, 'has_div': has_div, 'score': score, 'bucket': _bucket_of(score),
+        })
+    wrows.sort(key=lambda r: -r['score'])
+    return rows, wrows
+
+
+def generate_daily_xlsx(rows, wrows, date_str: str) -> str:
+    if not OPENPYXL:
+        raise RuntimeError('openpyxl 미설치')
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = '종합분석'
+    head_fill = openpyxl.styles.PatternFill('solid', fgColor='1565C0')
+    head_font = openpyxl.styles.Font(color='FFFFFF', bold=True)
+    headers = ['구분', '종목명', '코드', '증권사', '매입가', '수량', '현재가', '오늘%', '누적%', '외국인%', '배당']
+    ws.append(headers)
+    for c in ws[1]:
+        c.fill = head_fill; c.font = head_font
+    for r in rows:
+        ws.append([r['bucket'], r['name'], r['code'], r['brkr'], r['buy'], r['qty'], r['px'],
+                   round(r['today_pct'], 2), round(r['pnl_pct'], 2), r['frgn'], 'Y' if r['has_div'] else ''])
+    ws.append([])
+    ws.append(['── 관심종목(미보유) ──'])
+    for r in wrows:
+        ws.append([r['bucket'], r['name'], r['code'], '', '', '', r['px'],
+                   round(r['today_pct'], 2), '', r['frgn'], 'Y' if r['has_div'] else ''])
+    for i, w in enumerate([14, 16, 10, 10, 10, 8, 10, 8, 8, 9, 6], start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    fpath = os.path.join(SHARED_DIR, f'종합분석_{date_str}.xlsx')
+    wb.save(fpath)
+    return fpath
+
+
+def generate_daily_pdf(rows, wrows, date_str: str) -> str:
+    if not REPORTLAB:
+        raise RuntimeError('reportlab 미설치')
+    fpath = os.path.join(SHARED_DIR, f'종합분석_{date_str}.pdf')
+    c = _rl_canvas.Canvas(fpath, pagesize=_RL_A4)
+    width, height = _RL_A4
+    FONT = 'HYSMyeongJo-Medium'
+    y = height - 50
+
+    def line(text, size=10, dy=16, bold_color=None):
+        nonlocal y
+        if y < 50:
+            c.showPage(); y = height - 50
+        c.setFont(FONT, size)
+        if bold_color:
+            c.setFillColorRGB(*bold_color)
+        else:
+            c.setFillColorRGB(0, 0, 0)
+        c.drawString(40, y, text)
+        y -= dy
+
+    line(f"보유/관심 종목 종합분석 ({date_str})", size=16)
+    line("오늘 모멘텀, 외국인 지분율, 배당, 누적손익을 종합 점수화한 자동 분석입니다.", size=9)
+    y -= 6
+
+    cur_bucket = None
+    for r in rows:
+        if r['bucket'] != cur_bucket:
+            cur_bucket = r['bucket']
+            y -= 6
+            line(f"● {cur_bucket}", size=12, bold_color=(0.08, 0.4, 0.75))
+        txt = (f"{r['name']}({r['code']}, {r['brkr']}) 매입 {r['buy']:,.0f}x{r['qty']} → "
+               f"현재 {r['px']:,.0f} [오늘 {r['today_pct']:+.1f}% 누적 {r['pnl_pct']:+.1f}% "
+               f"외인 {r['frgn'] if r['frgn'] is not None else '-'}%]")
+        line(txt, size=9)
+
+    if wrows:
+        y -= 10
+        line("[번외] 관심종목 (미보유)", size=12, bold_color=(0, 0.5, 0.55))
+        for r in wrows:
+            txt = f"{r['name']}({r['code']}) 현재 {r['px']:,.0f} [오늘 {r['today_pct']:+.1f}% 외인 {r['frgn'] if r['frgn'] is not None else '-'}%] / {r['bucket']}"
+            line(txt, size=9)
+
+    y -= 14
+    line("※ 투자 자문이 아닌 참고 자료이며, 실제 매매 판단은 본인 책임 하에 신중히 내리시기 바랍니다.", size=8)
+    c.save()
+    return fpath
+
+
+def send_email_with_attachments(subject: str, body: str, attachment_paths: list) -> bool:
+    if not (EMAIL_USER and EMAIL_APP_PASS and EMAIL_TO):
+        _log("[이메일ERR] EMAIL_USER/EMAIL_APP_PASSWORD/EMAIL_TO 미설정")
+        return False
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = EMAIL_USER
+        msg['To'] = EMAIL_TO
+        msg.set_content(body)
+        for fp in attachment_paths:
+            if not fp or not os.path.exists(fp):
+                continue
+            with open(fp, 'rb') as f:
+                data = f.read()
+            ext = os.path.splitext(fp)[1].lower()
+            maintype, subtype = ('application', 'octet-stream')
+            if ext == '.pdf': maintype, subtype = 'application', 'pdf'
+            elif ext == '.xlsx': maintype, subtype = 'application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=os.path.basename(fp))
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=20) as s:
+            s.starttls()
+            s.login(EMAIL_USER, EMAIL_APP_PASS)
+            s.send_message(msg)
+        _log(f"[이메일] 발송 완료 → {EMAIL_TO} ({len(attachment_paths)}개 첨부)")
+        return True
+    except Exception as e:
+        _log(f"[이메일ERR] 발송 실패: {type(e).__name__}: {e}")
+        return False
+
+
+def _run_daily_files_job() -> dict:
+    """종합분석 엑셀/PDF를 날짜별로 생성하고 이메일로 발송. /api/send_report, /api/send_daily_files 공용."""
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    rows, wrows = collect_analysis_rows()
+    if not rows and not wrows:
+        return {'ok': False, 'error': '보유/관심 종목 데이터 없음'}
+
+    out = {'ok': False, 'xlsx': None, 'pdf': None, 'emailed': False}
+    paths = []
+    try:
+        xp = generate_daily_xlsx(rows, wrows, date_str)
+        out['xlsx'] = os.path.basename(xp)
+        paths.append(xp)
+    except Exception as e:
+        _log(f"[종합분석ERR] xlsx 생성 실패: {e}")
+    try:
+        pp = generate_daily_pdf(rows, wrows, date_str)
+        out['pdf'] = os.path.basename(pp)
+        paths.append(pp)
+    except Exception as e:
+        _log(f"[종합분석ERR] pdf 생성 실패: {e}")
+
+    if paths:
+        subject = f"[주식트래커] {date_str} 보유·관심종목 종합분석"
+        body = (f"{date_str} 기준 보유·관심종목 종합분석 파일을 첨부합니다.\n"
+                f"보유 {len(rows)}건 · 관심 {len(wrows)}건\n\n"
+                f"※ 투자 자문이 아닌 참고 자료입니다.")
+        out['emailed'] = send_email_with_attachments(subject, body, paths)
+        out['ok'] = True
+    return out
+
+
 def send_telegram_message(text: str) -> bool:
     """텔레그램으로 메시지 발송 (4096자 제한 → 줄 단위로 안전하게 분할 전송)"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -2141,9 +2412,24 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 report = build_daily_report()
                 sent = send_telegram_message(report)
-                self._serve_json({'ok': sent, 'chars': len(report)})
+                result = {'ok': sent, 'chars': len(report)}
             except Exception as e:
                 _log(f"[리포트ERR] /api/send_report: {type(e).__name__}: {e}")
+                result = {'ok': False, 'error': str(e)}
+            # 같은 예약 작업 호출 한 번으로 엑셀/PDF 생성 + 이메일 발송까지 처리
+            try:
+                result['files'] = _run_daily_files_job()
+            except Exception as e:
+                _log(f"[종합분석ERR] send_report 연계 실패: {type(e).__name__}: {e}")
+                result['files'] = {'ok': False, 'error': str(e)}
+            self._serve_json(result)
+
+        elif path == '/api/send_daily_files':
+            # 종합분석 엑셀/PDF만 즉시 생성+이메일 발송 (수동 테스트용)
+            try:
+                self._serve_json(_run_daily_files_job())
+            except Exception as e:
+                _log(f"[종합분석ERR] /api/send_daily_files: {type(e).__name__}: {e}")
                 self._serve_json({'ok': False, 'error': str(e)})
 
         elif path.startswith('/api/search/'):
