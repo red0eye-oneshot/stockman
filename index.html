@@ -1416,6 +1416,8 @@ async function loadOne(s) {
       prevClose: j.prevClose??null,     // 서버 계산 전일종가 (장개시 정확도↑)
       isMarketOpen: j.isMarketOpen??false,
       frgnRatio: j.frgnRatio??null,
+      dividend: j.dividend??null,
+      dividendYieldRatio: j.dividendYieldRatio??null,
       investors: j.investors??{},
       invDaily:  j.invDaily??[],
       indivDaily: j.indivDaily??[],
@@ -2653,7 +2655,7 @@ async function exportExcel() {
     }
 
     /* ── 시트1: 오늘현황 ── */
-    const h1=['증권사','종목명','종목코드','현재가','전일대비','등락률%','1M%','3M%','매수단가','보유수량','매수일','투자원금','평가금액','손익금액','손익률%','오늘손익','외국인%'];
+    const h1=['증권사','종목명','종목코드','현재가','전일대비','등락률%','1M%','3M%','매수단가','보유수량','매수일','투자원금','평가금액','손익금액','손익률%','오늘손익','외국인%','배당금'];
     const brkrMap={};
     STOCKS.forEach(s=>{const b=s.brkr||'기타';(brkrMap[b]=brkrMap[b]||[]).push(s);});
     // ① 전체합계 먼저 계산 (행을 맨 위에 배치하기 위해 사전 집계)
@@ -2683,6 +2685,7 @@ async function exportExcel() {
       tot.ok?{v:Math.round(tot.tI),t:'n',z:'#,##0',s:ms({bold:true,color:C_WHITE,bg:BG_TOTAL,sz:12})}:{v:'',t:'s',s:ms({bg:BG_TOTAL})},
       tot.ok?{v:Math.round(tot.tE),t:'n',z:'#,##0',s:ms({bold:true,color:C_WHITE,bg:BG_TOTAL,sz:12})}:{v:'',t:'s',s:ms({bg:BG_TOTAL})},
       totN(tot.ok?tot.gain:null),totP(tGR),totN(tot.tw),
+      {v:'',t:'s',s:ms({bg:BG_TOTAL})},
       {v:'',t:'s',s:ms({bg:BG_TOTAL})},
     ]);
     // ③ 증권사별 그룹 (각 그룹 뒤에 소계)
@@ -2718,6 +2721,7 @@ async function exportExcel() {
           g!=null?nC(g,bg):blk(bg),gR!=null?pC(gR,bg):blk(bg),
           tw!=null?nC(tw,bg):blk(bg),
           d.frgnRatio!=null?{v:d.frgnRatio,t:'n',z:'0.0',s:ms({color:C_GRAY,bg})}:blk(bg),
+          d.dividend!=null?{v:d.dividend,t:'n',z:'#,##0',s:ms({color:C_GRAY,bg})}:blk(bg),
         ];
         // 새 증권사 그룹이 시작되는 첫 행 위쪽에 흰 선을 그어 이전 그룹(소계)과 구분
         if(firstRow&&gi>0) row=row.map(withTopDiv);
@@ -2732,10 +2736,11 @@ async function exportExcel() {
         bs.ok?{v:Math.round(bs.tE),t:'n',z:'#,##0',s:ms({bold:true,color:C_GOLD,bg:BG_BRKR})}:{v:'',t:'s',s:ms({bg:BG_BRKR})},
         brkrN(bs.ok?bs.gain:null),brkrP(bGR),brkrN(bs.ok?bs.tw:null),
         {v:'',t:'s',s:ms({bg:BG_BRKR})},
+        {v:'',t:'s',s:ms({bg:BG_BRKR})},
       ]);
     });
     const ws1=buildSheet(r1);
-    ws1['!cols']=[12,16,10,12,12,8,7,7,12,8,12,14,14,14,8,12,8].map(w=>({wch:w}));
+    ws1['!cols']=[12,16,10,12,12,8,7,7,12,8,12,14,14,14,8,12,8,10].map(w=>({wch:w}));
     ws1['!rows']=[{hpt:22}];
     XLSX.utils.book_append_sheet(wb,ws1,'오늘현황');
 

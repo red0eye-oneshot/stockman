@@ -396,6 +396,8 @@ def _fetch_investor_data_raw(code: str) -> dict:
       C) 네이버 PC HTML 파싱
     """
     frgn_ratio = None
+    dividend   = None
+    div_yield  = None
     inv        = {}
     stock_name = ''
     _dbg       = []   # 디버그 로그 (서버 콘솔 + /api/debug 엔드포인트)
@@ -436,9 +438,36 @@ def _fetch_investor_data_raw(code: str) -> dict:
             PYKRX_INV_DEAD = True   # 다음 종목부터는 시도조차 안 함
 
     # ════════════════════════════════
-    # B) (제거) 네이버 모바일 JSON API
-    #    /api/stock/{code}/investor 등은 2026년 모두 404 반환 → 제거.
+    # B) 네이버 모바일 JSON API — /api/stock/{code}/integration
+    #    (예전엔 /api/stock/{code}/investor 등을 시도했는데 2026년에 404로 전부 막혀서 제거했었음.
+    #     integration은 가격 조회에 이미 쓰고 있는 /basic과 같은 계열 엔드포인트라 더 안정적일 것으로
+    #     보고 새로 추가 — 외국인소진율(foreignRate)과 배당금(dividend)을 여기서 가져옴)
     # ════════════════════════════════
+    try:
+        r_int = SESSION.get(f"https://m.stock.naver.com/api/stock/{code}/integration",
+                             headers=HEADERS, timeout=8)
+        _dbg.append(f'mstock integration: HTTP {r_int.status_code}')
+        if r_int.status_code == 200:
+            j_int = r_int.json()
+            rows = j_int.get('totalInfos') or []
+            info = {}
+            for row in rows:
+                if isinstance(row, dict) and 'code' in row:
+                    info[row['code']] = row.get('value')
+            _dbg.append(f'  integration keys={list(info.keys())[:20]}')
+            fr = _mkt_num(info.get('foreignRate'))
+            if fr is not None:
+                frgn_ratio = fr
+                _dbg.append(f'  frgnRatio(integration)={frgn_ratio}')
+            dv = _mkt_num(info.get('dividend'))
+            if dv is not None:
+                dividend = dv
+                _dbg.append(f'  dividend(integration)={dividend}')
+            dy = _mkt_num(info.get('dividendYieldRatio'))
+            if dy is not None:
+                div_yield = dy
+    except Exception as e:
+        _dbg.append(f'mstock integration ERR: {type(e).__name__}: {e}')
 
     # ════════════════════════════════
     # C) 네이버 PC HTML — frgnRatio + sise_investor 전체 수급
@@ -632,7 +661,8 @@ def _fetch_investor_data_raw(code: str) -> dict:
             for r in inv_daily
         ]
 
-    return {'frgnRatio': frgn_ratio, 'investors': normalized, 'invDaily': inv_daily, 'indivDaily': indiv_daily, 'name': stock_name}
+    return {'frgnRatio': frgn_ratio, 'investors': normalized, 'invDaily': inv_daily, 'indivDaily': indiv_daily,
+            'name': stock_name, 'dividend': dividend, 'dividendYieldRatio': div_yield}
 
 
 
@@ -806,7 +836,7 @@ MKT_TTL = 30                # 30초 캐시
 def _mkt_num(s):
     if s is None: return None
     try:
-        return float(str(s).replace(',', '').replace(' ', '').replace('%', ''))
+        return float(str(s).replace(',', '').replace(' ', '').replace('%', '').replace('원', ''))
     except (TypeError, ValueError):
         return None
 
@@ -1531,7 +1561,8 @@ def get_stock_data(code: str) -> dict:
         try:
             inv_data = f_inv.result(timeout=12)
         except Exception:
-            inv_data = {'frgnRatio': None, 'investors': {}, 'invDaily': [], 'indivDaily': [], 'name': ''}
+            inv_data = {'frgnRatio': None, 'investors': {}, 'invDaily': [], 'indivDaily': [], 'name': '',
+                        'dividend': None, 'dividendYieldRatio': None}
         try:
             fin_data = f_fin.result(timeout=12)
         except Exception:
@@ -1598,6 +1629,8 @@ def get_stock_data(code: str) -> dict:
             'r2':   ret(px, p2),
             'r3':   ret(px, p3),
             'frgnRatio': inv_data.get('frgnRatio'),
+            'dividend': inv_data.get('dividend'),
+            'dividendYieldRatio': inv_data.get('dividendYieldRatio'),
             'investors': inv_data.get('investors', {}),
             'invDaily':  inv_data.get('invDaily', []),
             'indivDaily': inv_data.get('indivDaily', []),
