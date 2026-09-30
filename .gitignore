@@ -16,6 +16,7 @@ android.keystore
 portfolio.json
 recommend_dates.json
 telegram_config.json
+shared_files/
 
 # ── 빌드 산출물 / 로그 (레포에 불필요) ─────────────────
 build/

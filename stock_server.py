@@ -1688,6 +1688,92 @@ MANIFEST_PATH  = os.path.join(SCRIPT_DIR, 'manifest.json')
 SW_PATH        = os.path.join(SCRIPT_DIR, 'sw.js')
 PORTFOLIO_PATH = os.path.join(SCRIPT_DIR, 'portfolio.json')
 
+# ── 공유 파일함 (엑셀/PDF 등을 노트북↔데스크탑↔폰 간에 공유) ─────
+SHARED_DIR = os.path.join(SCRIPT_DIR, 'shared_files')
+os.makedirs(SHARED_DIR, exist_ok=True)
+SHARED_ALLOWED_EXT = {'.xlsx', '.xls', '.csv', '.pdf', '.docx', '.txt', '.png', '.jpg', '.jpeg'}
+
+def _safe_shared_name(name: str) -> str:
+    """경로 조작(../ 등) 방지 — 파일명만 남기고 확장자 검증."""
+    name = os.path.basename(unquote(name or '')).strip()
+    if not name or name in ('.', '..'):
+        raise ValueError('invalid filename')
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in SHARED_ALLOWED_EXT:
+        raise ValueError(f'허용되지 않는 확장자: {ext}')
+    return name
+
+def list_shared_files() -> list:
+    out = []
+    try:
+        for fn in sorted(os.listdir(SHARED_DIR)):
+            fp = os.path.join(SHARED_DIR, fn)
+            if os.path.isfile(fp):
+                st = os.stat(fp)
+                out.append({'name': fn, 'size': st.st_size,
+                            'mtime': datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')})
+    except Exception as e:
+        _log(f'list_shared_files error: {e}')
+    return out
+
+_SHARED_MIME = {
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.xls':  'application/vnd.ms-excel',
+    '.csv':  'text/csv; charset=utf-8',
+    '.pdf':  'application/pdf',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.txt':  'text/plain; charset=utf-8',
+    '.png':  'image/png',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+}
+
+def _shared_files_page_html() -> bytes:
+    files = list_shared_files()
+    key_q = f'?key={quote(API_KEY)}' if API_KEY else ''
+    rows_html = ''.join(
+        f'<tr><td><a href="/files/{quote(f["name"])}{key_q}">{f["name"]}</a></td>'
+        f'<td>{f["size"]//1024:,} KB</td><td>{f["mtime"]}</td></tr>'
+        for f in files
+    ) or '<tr><td colspan="3" style="color:#888">업로드된 파일이 없습니다.</td></tr>'
+    html = f"""<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>주식트래커 - 공유 파일함</title>
+<style>
+body{{font-family:-apple-system,'맑은 고딕',sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#222}}
+h2{{margin-bottom:4px}} table{{width:100%;border-collapse:collapse;margin-top:16px}}
+td,th{{padding:8px;border-bottom:1px solid #eee;text-align:left;font-size:14px}}
+a{{color:#1565C0;text-decoration:none}} a:hover{{text-decoration:underline}}
+.up{{margin-top:20px;padding:16px;background:#f5f5f5;border-radius:10px}}
+button{{background:#1565C0;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer}}
+input[type=file]{{margin-right:8px}}
+</style></head><body>
+<h2>📁 공유 파일함</h2>
+<p style="color:#666;font-size:13px">엑셀·PDF 등을 올려두면 노트북·데스크탑·폰 어디서든 이 페이지에서 받을 수 있습니다.</p>
+<div class="up">
+  <input type="file" id="f" accept=".xlsx,.xls,.csv,.pdf,.docx,.txt,.png,.jpg,.jpeg">
+  <button onclick="upload()">업로드</button>
+  <span id="msg" style="margin-left:10px;font-size:13px"></span>
+</div>
+<table><tr><th>파일명</th><th>크기</th><th>수정일시</th></tr>{rows_html}</table>
+<script>
+async function upload(){{
+  const el = document.getElementById('f');
+  const file = el.files[0];
+  const msg = document.getElementById('msg');
+  if(!file){{ msg.textContent='파일을 선택하세요'; return; }}
+  msg.textContent='업로드 중...';
+  try {{
+    const res = await fetch('/api/files/upload?key={quote(API_KEY) if API_KEY else ""}&name='+encodeURIComponent(file.name), {{method:'POST', body: file}});
+    const j = await res.json();
+    if(j.ok){{ msg.textContent='업로드 완료'; location.reload(); }}
+    else {{ msg.textContent='실패: '+(j.error||''); }}
+  }} catch(e) {{ msg.textContent='오류: '+e; }}
+}}
+</script>
+</body></html>"""
+    return html.encode('utf-8')
+
 # ── 포트폴리오 파일 읽기/쓰기 ────────────────────────────────
 _portfolio_lock = threading.Lock()
 
@@ -2006,7 +2092,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split('?')[0].rstrip('/')
 
         public_paths = ('', '/index.html', '/stock_tracker.html',
-                        '/manifest.json', '/sw.js', '/api/ping', '/api/heartbeat')
+                        '/manifest.json', '/sw.js', '/api/ping', '/api/heartbeat', '/files')
 
         if path not in public_paths and not self._check_auth():
             self.send_error(401, 'Unauthorized - invalid or missing API key')
@@ -2076,6 +2162,36 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/api/reload':
             clear_cache()
             self._serve_json({'ok': True, 'msg': '캐시 초기화 완료'})
+
+        elif path == '/files':
+            self._send(200, _shared_files_page_html(), 'text/html; charset=utf-8', no_store=True)
+
+        elif path.startswith('/files/'):
+            try:
+                fname = _safe_shared_name(path[len('/files/'):])
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
+            fpath = os.path.join(SHARED_DIR, fname)
+            ext = os.path.splitext(fname)[1].lower()
+            ctype = _SHARED_MIME.get(ext, 'application/octet-stream')
+            try:
+                with open(fpath, 'rb') as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Content-Disposition', f'attachment; filename="{quote(fname)}"')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(body)
+            except FileNotFoundError:
+                self.send_error(404, 'File not found')
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
+
+        elif path == '/api/files/list':
+            self._serve_json({'files': list_shared_files()})
 
         elif path.startswith('/api/debug/'):
             code = path.split('/')[-1]
@@ -2156,6 +2272,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 _log(f'portfolio POST error: {e}')
                 self.send_error(400, f'Bad request: {e}')
+
+        elif path == '/api/files/upload':
+            # 공유 파일함 업로드: ?name=파일명.xlsx 로 원본 파일명을 넘기고, 바디는 파일 바이트 그대로
+            try:
+                m = re.search(r'[?&]name=([^&]+)', self.path)
+                raw_name = unquote(m.group(1)) if m else ''
+                fname = _safe_shared_name(raw_name)
+                length = int(self.headers.get('Content-Length', 0))
+                if length <= 0 or length > 50 * 1024 * 1024:  # 50MB 제한
+                    self.send_error(400, 'Invalid file size')
+                    return
+                body = self.rfile.read(length)
+                with open(os.path.join(SHARED_DIR, fname), 'wb') as f:
+                    f.write(body)
+                _log(f'[공유파일] 업로드: {fname} ({length:,} bytes)')
+                self._serve_json({'ok': True, 'name': fname, 'size': length})
+            except ValueError as e:
+                self._serve_json({'ok': False, 'error': str(e)})
+            except Exception as e:
+                _log(f'files upload error: {e}')
+                self._serve_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/recommend_dates':
             # 로컬 PC가 엑셀을 파싱한 결과를 클라우드에 push할 때 사용 (클라우드엔 엑셀이 없음)
