@@ -2287,6 +2287,43 @@ def send_email_with_attachments(subject: str, body: str, attachment_paths: list)
         return False
 
 
+_sched_lock = threading.Lock()
+_sched_last_fired = {'pre': None, 'post': None}  # 마지막으로 발송 성공한 날짜(YYYY-MM-DD, KST)
+
+def _kst_now() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=9)
+
+def _fire_scheduled_job(label: str):
+    try:
+        _log(f"[스케줄러] {label} 자동 리포트 실행 시작")
+        result = _run_daily_files_job()
+        report = build_daily_report()
+        send_telegram_message(f"[{label}]\n" + report)
+        _log(f"[스케줄러] {label} 완료: {result}")
+    except Exception as e:
+        _log(f"[스케줄러ERR] {label} 실패: {type(e).__name__}: {e}")
+
+def _daily_schedule_worker():
+    """평일 장시작 전(08:50)·장마감 후(15:40) KST 기준으로 하루 두 번 엑셀/PDF 생성+이메일+텔레그램 발송."""
+    _log("[스케줄러] 장전/장마감 자동 리포트 스케줄러 시작 (평일 08:50, 15:40 KST)")
+    while True:
+        try:
+            kst = _kst_now()
+            if kst.weekday() < 5:  # 월~금만
+                date_str = kst.strftime('%Y-%m-%d')
+                hm = kst.hour * 60 + kst.minute
+                with _sched_lock:
+                    if 530 <= hm <= 535 and _sched_last_fired['pre'] != date_str:
+                        _sched_last_fired['pre'] = date_str
+                        threading.Thread(target=_fire_scheduled_job, args=('장시작전',), daemon=True).start()
+                    if 940 <= hm <= 945 and _sched_last_fired['post'] != date_str:
+                        _sched_last_fired['post'] = date_str
+                        threading.Thread(target=_fire_scheduled_job, args=('장마감후',), daemon=True).start()
+        except Exception as e:
+            _log(f"[스케줄러ERR] 루프 오류: {type(e).__name__}: {e}")
+        time.sleep(60)
+
+
 def _run_daily_files_job() -> dict:
     """종합분석 엑셀/PDF를 날짜별로 생성하고 이메일로 발송. /api/send_report, /api/send_daily_files 공용."""
     date_str = datetime.now().strftime('%Y-%m-%d')
@@ -2661,6 +2698,11 @@ def main():
         global _last_heartbeat
         _last_heartbeat = time.time()   # 서버 막 시작한 시점부터 grace 시작
         threading.Thread(target=_heartbeat_watchdog, daemon=True).start()
+
+    # 장전/장마감 자동 리포트는 항상 켜져있는 클라우드 서버에서만 실행
+    # (로컬 PC는 꺼져있는 시간이 많아 중복 발송 방지 차원에서 제외)
+    if is_cloud:
+        threading.Thread(target=_daily_schedule_worker, daemon=True).start()
 
     srv = ThreadedServer(('', PORT), Handler)
 
