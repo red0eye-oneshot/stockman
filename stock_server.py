@@ -2296,9 +2296,10 @@ def _kst_now() -> datetime:
 def _fire_scheduled_job(label: str):
     try:
         _log(f"[스케줄러] {label} 자동 리포트 실행 시작")
-        result = _run_daily_files_job()
-        report = build_daily_report()
-        send_telegram_message(f"[{label}]\n" + report)
+        rows, wrows = collect_analysis_rows()
+        result = _run_daily_files_job(rows, wrows)
+        text = build_telegram_analysis_text(rows, wrows)
+        send_telegram_message(f"[{label}]\n" + text)
         _log(f"[스케줄러] {label} 완료: {result}")
     except Exception as e:
         _log(f"[스케줄러ERR] {label} 실패: {type(e).__name__}: {e}")
@@ -2324,10 +2325,42 @@ def _daily_schedule_worker():
         time.sleep(60)
 
 
-def _run_daily_files_job() -> dict:
+def build_telegram_analysis_text(rows: list, wrows: list) -> str:
+    """종합분석(상승 흐름 기대/유지관망/리스크관리/보수적 접근) 내용을 텔레그램 텍스트로 변환."""
+    def pct(n): return f"{n:+.1f}%"
+    def won(n): return f"{n:,.0f}원"
+
+    today = datetime.now().strftime('%Y-%m-%d (%a)')
+    parts = [f"📊 보유·관심종목 종합분석\n{today} 기준\n" + "─"*20]
+
+    cur = None
+    for r in rows:
+        if r['bucket'] != cur:
+            cur = r['bucket']
+            emoji = {'상승 흐름 기대': '🟢', '유지/관망': '🟡', '리스크 관리 필요': '🟠', '보수적 접근 권고': '🔴'}.get(cur, '•')
+            parts.append(f"\n{emoji} {cur}")
+        frgn_txt = f" 외인 {r['frgn']}%" if r['frgn'] is not None else ''
+        line = (f"· {r['name']}({r['code']}, {r['brkr']}) 매입 {won(r['buy'])}x{r['qty']} → "
+                f"현재 {won(r['px'])} [오늘 {pct(r['today_pct'])} 누적 {pct(r['pnl_pct'])}{frgn_txt}]")
+        parts.append(line)
+
+    if wrows:
+        parts.append("\n⭐ 번외 종목 (관심종목, 미보유)")
+        cur = None
+        for r in wrows:
+            frgn_txt = f" 외인 {r['frgn']}%" if r['frgn'] is not None else ''
+            line = f"· {r['name']}({r['code']}) 현재 {won(r['px'])} [오늘 {pct(r['today_pct'])}{frgn_txt}] — {r['bucket']}"
+            parts.append(line)
+
+    parts.append("\n※ 투자 자문이 아닌 참고 자료이며, 실제 매매 판단은 본인 책임 하에 신중히 내리시기 바랍니다.")
+    return "\n".join(parts)
+
+
+def _run_daily_files_job(rows=None, wrows=None) -> dict:
     """종합분석 엑셀/PDF를 날짜별로 생성하고 이메일로 발송. /api/send_report, /api/send_daily_files 공용."""
     date_str = datetime.now().strftime('%Y-%m-%d')
-    rows, wrows = collect_analysis_rows()
+    if rows is None or wrows is None:
+        rows, wrows = collect_analysis_rows()
     if not rows and not wrows:
         return {'ok': False, 'error': '보유/관심 종목 데이터 없음'}
 
@@ -2445,17 +2478,19 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_json(load_portfolio())
 
         elif path == '/api/send_report':
-            # 관심종목+보유종목 일일 리포트를 생성해 텔레그램으로 발송 (예약 작업이 매일 호출)
+            # 종합분석(상승 흐름 기대/유지관망/리스크관리/보수적 접근) 내용을 텔레그램 + 이메일(엑셀/PDF)로 발송
+            # (예약 작업이 매일 호출. 예전의 개별 종목 뉴스 나열 리포트는 더 이상 사용하지 않음)
             try:
-                report = build_daily_report()
-                sent = send_telegram_message(report)
-                result = {'ok': sent, 'chars': len(report)}
+                rows, wrows = collect_analysis_rows()
+                text = build_telegram_analysis_text(rows, wrows)
+                sent = send_telegram_message(text)
+                result = {'ok': sent, 'chars': len(text)}
             except Exception as e:
                 _log(f"[리포트ERR] /api/send_report: {type(e).__name__}: {e}")
                 result = {'ok': False, 'error': str(e)}
-            # 같은 예약 작업 호출 한 번으로 엑셀/PDF 생성 + 이메일 발송까지 처리
+                rows = wrows = None
             try:
-                result['files'] = _run_daily_files_job()
+                result['files'] = _run_daily_files_job(rows, wrows)
             except Exception as e:
                 _log(f"[종합분석ERR] send_report 연계 실패: {type(e).__name__}: {e}")
                 result['files'] = {'ok': False, 'error': str(e)}
