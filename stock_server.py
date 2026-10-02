@@ -116,6 +116,20 @@ if not EMAIL_USER or not EMAIL_APP_PASS:
     except Exception:
         pass
 
+# ── Gemini (무료 AI로 종목 뉴스 해석/요약) ──────────────────
+# 보안: API 키를 소스에 직접 적지 않음 → 환경변수(Render 배포용) 우선,
+# 없으면 로컬 gemini_config.json(.gitignore 처리, 깃허브에 올라가지 않음)에서 읽음.
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+GEMINI_MODEL   = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')
+if not GEMINI_API_KEY:
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gemini_config.json'), 'r', encoding='utf-8') as _gf:
+            _ge_cfg = json.load(_gf)
+        GEMINI_API_KEY = GEMINI_API_KEY or _ge_cfg.get('api_key', '')
+        GEMINI_MODEL   = _ge_cfg.get('model', GEMINI_MODEL)
+    except Exception:
+        pass
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1979,6 +1993,51 @@ def fetch_stock_news(code: str, limit: int = 2) -> list:
         return []
 
 
+_gemini_sem = threading.Semaphore(3)  # 무료 티어 RPM 보호용 동시 호출 제한
+
+def summarize_with_gemini(name: str, code: str, today_pct, pnl_pct, frgn, has_div: bool, news: list) -> str:
+    """종목의 시세 요약 + 최근 뉴스 제목들을 Gemini에게 넘겨 1~2문장 해석/요약을 받아온다.
+    API 키 미설정이거나 호출 실패 시 빈 문자열 반환 (절대 예외를 밖으로 던지지 않음)."""
+    if not GEMINI_API_KEY:
+        return ''
+    if not news:
+        return ''
+    try:
+        news_lines = "\n".join(f"- {n['title']} ({n['date']})" for n in news)
+        div_txt = "배당 있음" if has_div else "배당 없음"
+        frgn_txt = f"외국인 지분율 {frgn}%" if frgn is not None else "외국인 지분율 정보 없음"
+        prompt = (
+            f"너는 한국 주식 애널리스트야. 아래 종목의 최근 뉴스 헤드라인과 시세 정보를 보고, "
+            f"이 종목에 어떤 이슈가 있는지 핵심만 한국어 1~2문장으로 간결하게 해석해줘. "
+            f"추측성 투자 추천(사세요/파세요)은 하지 말고, 사실에 기반해 '무슨 일이 있었는지'와 '왜 그런 흐름인지'를 설명해줘.\n\n"
+            f"종목: {name}({code})\n"
+            f"오늘 등락률: {today_pct:+.1f}%\n"
+            f"누적 손익률: {pnl_pct if pnl_pct is not None else '정보없음'}\n"
+            f"{frgn_txt}, {div_txt}\n"
+            f"최근 뉴스:\n{news_lines}\n\n"
+            f"답변은 설명 문장만, 따옴표나 '답변:' 같은 머리말 없이 바로 작성해줘."
+        )
+        with _gemini_sem:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            r = requests.post(url, json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 200},
+            }, timeout=20)
+        if r.status_code != 200:
+            _log(f"[Gemini ERR] {code}: HTTP {r.status_code} {r.text[:200]}")
+            return ''
+        j = r.json()
+        cands = j.get('candidates') or []
+        if not cands:
+            return ''
+        parts = (cands[0].get('content') or {}).get('parts') or []
+        text = "".join(p.get('text', '') for p in parts).strip()
+        return text
+    except Exception as e:
+        _log(f"[Gemini ERR] {code}: {type(e).__name__}: {e}")
+        return ''
+
+
 def build_daily_report() -> str:
     """관심종목 + 보유종목 전체를 훑어 일일 리포트 텍스트 생성.
     시세/뉴스 조회는 공유 스레드풀로 병렬 처리해 종목이 많아도 전체 소요시간을 줄인다."""
@@ -2129,6 +2188,7 @@ def collect_analysis_rows():
     all_real = list(real_codes | set(watch_only))
     ex = _shared_pool
     futs = {c: ex.submit(get_stock_data, c) for c in all_real}
+    news_futs = {c: ex.submit(fetch_stock_news, c, 2) for c in all_real}
     data_map = {}
     for c, f in futs.items():
         try:
@@ -2136,6 +2196,12 @@ def collect_analysis_rows():
         except Exception as e:
             _log(f"[종합분석] get_stock_data({c}) 실패: {e}")
             data_map[c] = {'ok': False}
+    news_map = {}
+    for c, f in news_futs.items():
+        try:
+            news_map[c] = f.result(timeout=10)
+        except Exception:
+            news_map[c] = []
 
     rows = []
     for code in held_codes:
@@ -2158,6 +2224,7 @@ def collect_analysis_rows():
             'name': name_map.get(code, real), 'code': real, 'brkr': brkr_map.get(code, ''),
             'buy': buy, 'qty': qty, 'px': px, 'pnl_pct': pnl_pct, 'today_pct': today_pct,
             'frgn': frgn, 'has_div': has_div, 'score': score, 'bucket': _bucket_of(score),
+            'news': news_map.get(real, []),
         })
     rows.sort(key=lambda r: -r['score'])
 
@@ -2175,8 +2242,31 @@ def collect_analysis_rows():
         wrows.append({
             'name': d.get('name', code), 'code': code, 'px': px, 'today_pct': today_pct,
             'frgn': frgn, 'has_div': has_div, 'score': score, 'bucket': _bucket_of(score),
+            'news': news_map.get(code, []),
         })
     wrows.sort(key=lambda r: -r['score'])
+
+    # Gemini AI 해석/요약 (API 키 설정된 경우에만 동작, 뉴스가 있는 종목만 대상)
+    if GEMINI_API_KEY:
+        all_entries = rows + wrows
+        insight_futs = {}
+        for r in all_entries:
+            if r.get('news'):
+                insight_futs[id(r)] = (r, ex.submit(
+                    summarize_with_gemini, r['name'], r['code'], r['today_pct'],
+                    r.get('pnl_pct'), r['frgn'], r['has_div'], r['news']))
+        for key, (r, f) in insight_futs.items():
+            try:
+                r['insight'] = f.result(timeout=25)
+            except Exception as e:
+                _log(f"[Gemini ERR] {r['code']} 결과 수신 실패: {e}")
+                r['insight'] = ''
+        for r in all_entries:
+            r.setdefault('insight', '')
+    else:
+        for r in rows + wrows:
+            r['insight'] = ''
+
     return rows, wrows
 
 
@@ -2188,20 +2278,28 @@ def generate_daily_xlsx(rows, wrows, date_str: str) -> str:
     ws.title = '종합분석'
     head_fill = openpyxl.styles.PatternFill('solid', fgColor='1565C0')
     head_font = openpyxl.styles.Font(color='FFFFFF', bold=True)
-    headers = ['구분', '종목명', '코드', '증권사', '매입가', '수량', '현재가', '오늘%', '누적%', '외국인%', '배당']
+    headers = ['구분', '종목명', '코드', '증권사', '매입가', '수량', '현재가', '오늘%', '누적%', '외국인%', '배당', 'AI 해석', '최근 뉴스']
     ws.append(headers)
     for c in ws[1]:
         c.fill = head_fill; c.font = head_font
+    def news_txt(r):
+        news = r.get('news') or []
+        return ' / '.join(f"{n['title']}({n['date']})" for n in news) if news else ''
     for r in rows:
         ws.append([r['bucket'], r['name'], r['code'], r['brkr'], r['buy'], r['qty'], r['px'],
-                   round(r['today_pct'], 2), round(r['pnl_pct'], 2), r['frgn'], 'Y' if r['has_div'] else ''])
+                   round(r['today_pct'], 2), round(r['pnl_pct'], 2), r['frgn'], 'Y' if r['has_div'] else '',
+                   r.get('insight', ''), news_txt(r)])
     ws.append([])
     ws.append(['── 관심종목(미보유) ──'])
     for r in wrows:
         ws.append([r['bucket'], r['name'], r['code'], '', '', '', r['px'],
-                   round(r['today_pct'], 2), '', r['frgn'], 'Y' if r['has_div'] else ''])
-    for i, w in enumerate([14, 16, 10, 10, 10, 8, 10, 8, 8, 9, 6], start=1):
+                   round(r['today_pct'], 2), '', r['frgn'], 'Y' if r['has_div'] else '',
+                   r.get('insight', ''), news_txt(r)])
+    for i, w in enumerate([14, 16, 10, 10, 10, 8, 10, 8, 8, 9, 6, 45, 40], start=1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical='top')
     fpath = os.path.join(SHARED_DIR, f'종합분석_{date_str}.xlsx')
     wb.save(fpath)
     return fpath
@@ -2232,6 +2330,33 @@ def generate_daily_pdf(rows, wrows, date_str: str) -> str:
     line("오늘 모멘텀, 외국인 지분율, 배당, 누적손익을 종합 점수화한 자동 분석입니다.", size=9)
     y -= 6
 
+    def wrap(text, width_chars=58):
+        words = text.split(' ')
+        cur, out = '', []
+        for w in words:
+            if len(cur) + len(w) + 1 > width_chars:
+                out.append(cur); cur = w
+            else:
+                cur = (cur + ' ' + w).strip()
+        if cur: out.append(cur)
+        return out
+
+    def detail_lines(r):
+        insight = (r.get('insight') or '').strip()
+        news = r.get('news') or []
+        if insight:
+            for i, seg in enumerate(wrap(insight)):
+                prefix = "    [AI] " if i == 0 else "         "
+                line(f"{prefix}{seg}", size=8.5, dy=13, bold_color=(0.1, 0.45, 0.2))
+        elif news:
+            for n in news:
+                t = n['title']
+                if len(t) > 48:
+                    t = t[:48] + '...'
+                line(f"    - {t} ({n['date']})", size=8, dy=13, bold_color=(0.4, 0.4, 0.4))
+        else:
+            line("    (최근 뉴스 없음)", size=8, dy=13, bold_color=(0.55, 0.55, 0.55))
+
     cur_bucket = None
     for r in rows:
         if r['bucket'] != cur_bucket:
@@ -2242,6 +2367,7 @@ def generate_daily_pdf(rows, wrows, date_str: str) -> str:
                f"현재 {r['px']:,.0f} [오늘 {r['today_pct']:+.1f}% 누적 {r['pnl_pct']:+.1f}% "
                f"외인 {r['frgn'] if r['frgn'] is not None else '-'}%]")
         line(txt, size=9)
+        detail_lines(r)
 
     if wrows:
         y -= 10
@@ -2249,6 +2375,7 @@ def generate_daily_pdf(rows, wrows, date_str: str) -> str:
         for r in wrows:
             txt = f"{r['name']}({r['code']}) 현재 {r['px']:,.0f} [오늘 {r['today_pct']:+.1f}% 외인 {r['frgn'] if r['frgn'] is not None else '-'}%] / {r['bucket']}"
             line(txt, size=9)
+            detail_lines(r)
 
     y -= 14
     line("※ 투자 자문이 아닌 참고 자료이며, 실제 매매 판단은 본인 책임 하에 신중히 내리시기 바랍니다.", size=8)
@@ -2343,6 +2470,12 @@ def build_telegram_analysis_text(rows: list, wrows: list) -> str:
         line = (f"· {r['name']}({r['code']}, {r['brkr']}) 매입 {won(r['buy'])}x{r['qty']} → "
                 f"현재 {won(r['px'])} [오늘 {pct(r['today_pct'])} 누적 {pct(r['pnl_pct'])}{frgn_txt}]")
         parts.append(line)
+        insight = (r.get('insight') or '').strip()
+        if insight:
+            parts.append(f"    🤖 {insight}")
+        else:
+            for n in (r.get('news') or [])[:2]:
+                parts.append(f"    📰 {n['title']} ({n['date']})")
 
     if wrows:
         parts.append("\n⭐ 번외 종목 (관심종목, 미보유)")
@@ -2351,6 +2484,12 @@ def build_telegram_analysis_text(rows: list, wrows: list) -> str:
             frgn_txt = f" 외인 {r['frgn']}%" if r['frgn'] is not None else ''
             line = f"· {r['name']}({r['code']}) 현재 {won(r['px'])} [오늘 {pct(r['today_pct'])}{frgn_txt}] — {r['bucket']}"
             parts.append(line)
+            insight = (r.get('insight') or '').strip()
+            if insight:
+                parts.append(f"    🤖 {insight}")
+            else:
+                for n in (r.get('news') or [])[:2]:
+                    parts.append(f"    📰 {n['title']} ({n['date']})")
 
     parts.append("\n※ 투자 자문이 아닌 참고 자료이며, 실제 매매 판단은 본인 책임 하에 신중히 내리시기 바랍니다.")
     return "\n".join(parts)
