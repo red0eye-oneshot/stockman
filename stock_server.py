@@ -1999,6 +1999,20 @@ def fetch_stock_news(code: str, limit: int = 2) -> list:
         return []
 
 
+_job_state = {'running': False, 'started': None, 'finished': None, 'steps': [], 'result': None}
+
+
+def _jlog(msg: str):
+    """리포트 작업 진행 상황을 메모리에 기록(/api/job_status 로 조회) + 일반 로그에도 출력."""
+    try:
+        t = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime('%H:%M:%S')
+        _job_state['steps'].append(f"{t} {msg}")
+        del _job_state['steps'][:-120]
+    except Exception:
+        pass
+    _log(msg)
+
+
 _gemini_lock = threading.Lock()
 _gemini_last = [0.0]
 _gemini_dead = [False]   # 키 오류 시 True → 같은 실행에서 더 이상 호출하지 않음
@@ -2051,7 +2065,7 @@ def summarize_with_gemini(name: str, code: str, today_pct, pnl_pct, frgn, has_di
             if r.status_code in (400, 401, 403):
                 # 키가 잘못됐으면 나머지 종목도 전부 실패하므로 이번 실행에서는 AI 호출을 중단(PDF는 규칙 문장으로 계속 생성)
                 _gemini_dead[0] = True
-                _log("[Gemini] API 키 오류로 이번 실행의 AI 분석을 건너뜀 (Render 환경변수 GEMINI_API_KEY 확인 필요)")
+                _jlog("[Gemini] API 키 오류로 이번 실행의 AI 분석을 건너뜀 (Render 환경변수 GEMINI_API_KEY 확인 필요)")
             return ''
         if r is None or r.status_code != 200:
             return ''
@@ -2242,7 +2256,7 @@ def collect_analysis_rows():
                 _log(f"[종합분석] get_stock_data({c}) 최종 실패: {e}")
                 data_map[c] = {'ok': False}
     _ok_cnt = sum(1 for d in data_map.values() if d.get('px') is not None)
-    _log(f"[종합분석] 시세 조회 {_ok_cnt}/{len(all_real)} 성공 (보유코드 {len(held_codes)}개, 관심 {len(watch_only)}개)")
+    _jlog(f"[종합분석] 시세 조회 {_ok_cnt}/{len(all_real)} 성공 (보유코드 {len(held_codes)}개, 관심 {len(watch_only)}개)")
 
     news_futs = {c: ex.submit(fetch_stock_news, c, 5) for c in all_real}
     news_map = {}
@@ -2315,7 +2329,7 @@ def collect_analysis_rows():
                     insight_by_code[c] = ''
         for r in all_entries:
             r['insight'] = insight_by_code.get(r['code'], '')
-        _log(f"[Gemini] 분석 코멘트 {sum(1 for v in insight_by_code.values() if v)}/{len(insight_by_code)} 종목 생성")
+        _jlog(f"[Gemini] 분석 코멘트 {sum(1 for v in insight_by_code.values() if v)}/{len(insight_by_code)} 종목 생성")
     else:
         for r in rows + wrows:
             r['insight'] = ''
@@ -2567,7 +2581,7 @@ def generate_daily_docx(rows, wrows, date_str: str) -> str:
 
 def send_email_with_attachments(subject: str, body: str, attachment_paths: list) -> bool:
     if not (EMAIL_USER and EMAIL_APP_PASS and EMAIL_TO):
-        _log("[이메일ERR] EMAIL_USER/EMAIL_APP_PASSWORD/EMAIL_TO 미설정")
+        _jlog(f"[이메일ERR] 설정 누락: EMAIL_USER={bool(EMAIL_USER)} EMAIL_APP_PASSWORD={bool(EMAIL_APP_PASS)} EMAIL_TO={bool(EMAIL_TO)}")
         return False
     try:
         msg = EmailMessage()
@@ -2589,10 +2603,10 @@ def send_email_with_attachments(subject: str, body: str, attachment_paths: list)
             s.starttls()
             s.login(EMAIL_USER, EMAIL_APP_PASS)
             s.send_message(msg)
-        _log(f"[이메일] 발송 완료 → {EMAIL_TO} ({len(attachment_paths)}개 첨부)")
+        _jlog(f"[이메일] 발송 완료 → {EMAIL_TO} ({len(attachment_paths)}개 첨부)")
         return True
     except Exception as e:
-        _log(f"[이메일ERR] 발송 실패: {type(e).__name__}: {e}")
+        _jlog(f"[이메일ERR] 발송 실패: {type(e).__name__}: " + str(e).replace(EMAIL_APP_PASS or "~", "***"))
         return False
 
 
@@ -2674,12 +2688,14 @@ def _run_daily_files_job(rows=None, wrows=None) -> dict:
 
     out = {'ok': False, 'pdf': None, 'emailed': False}
     paths = []
+    _jlog(f"[종합분석] 데이터 수집 완료: 보유 {len(rows)}건, 관심 {len(wrows)}건 → PDF 생성 시작")
     try:
         pp = generate_daily_pdf(rows, wrows, date_str)
         out['pdf'] = os.path.basename(pp)
         paths.append(pp)
+        _jlog(f"[종합분석] PDF 생성 완료: {out['pdf']} (공유파일함 저장)")
     except Exception as e:
-        _log(f"[종합분석ERR] pdf 생성 실패: {e}")
+        _jlog(f"[종합분석ERR] pdf 생성 실패: {type(e).__name__}: {e}")
         out['error'] = f"pdf 생성 실패: {e}"
 
     if paths:
@@ -2793,6 +2809,9 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=_bg_report, daemon=True).start()
             self._serve_json({'ok': True, 'started': True})
 
+        elif path == '/api/job_status':
+            self._serve_json({**_job_state, 'steps': list(_job_state['steps'])})
+
         elif path == '/api/send_daily_files':
             # 종합분석 엑셀/PDF만 즉시 생성+이메일 발송 (수동 테스트용)
             # 종목별 AI 분석(검색 포함)에 수 분 걸리므로 백그라운드로 실행하고 즉시 응답
@@ -2801,12 +2820,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_json({'ok': False, 'error': '클라우드 포트폴리오가 비어 있음',
                                   'detail': '로컬 앱(stock_tracker.vbs)을 열어 데이터를 올린 뒤 다시 실행하세요.'})
                 return
+            if _job_state['running']:
+                self._serve_json({'ok': False, 'error': '이미 실행 중입니다. /api/job_status 에서 진행 상황을 확인하세요.'})
+                return
             def _bg():
+                _job_state.update(running=True, started=(datetime.now(timezone.utc) + timedelta(hours=9)).strftime('%Y-%m-%d %H:%M:%S'),
+                                  finished=None, steps=[], result=None)
+                _gemini_dead[0] = False
                 try:
+                    _jlog("[종합분석] 수동 실행 시작")
                     res = _run_daily_files_job()
-                    _log(f"[종합분석] 수동 실행 결과: {res}")
+                    _job_state['result'] = res
+                    _jlog(f"[종합분석] 실행 결과: {res}")
                 except Exception as e:
-                    _log(f"[종합분석ERR] /api/send_daily_files: {type(e).__name__}: {e}")
+                    _job_state['result'] = {'ok': False, 'error': f"{type(e).__name__}: {e}"}
+                    _jlog(f"[종합분석ERR] /api/send_daily_files: {type(e).__name__}: {e}")
+                finally:
+                    _job_state['running'] = False
+                    _job_state['finished'] = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime('%Y-%m-%d %H:%M:%S')
             threading.Thread(target=_bg, daemon=True).start()
             self._serve_json({'ok': True, 'started': True,
                               'msg': '생성 시작됨. 종목 수에 따라 3~6분 뒤 메일과 /files 페이지에서 PDF를 확인하세요.'})

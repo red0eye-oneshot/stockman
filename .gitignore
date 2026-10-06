@@ -30,3 +30,6 @@ server_log.txt
 py_start.log
 vbs_log.txt
 manifest-checksum.txt
+
+# 개인 보유종목 분석 문서 보관 폴더 (공개 저장소에 올리면 안 됨)
+보관/
