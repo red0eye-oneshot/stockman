@@ -2,3 +2,4 @@ requests
 pykrx
 openpyxl
 reportlab
+python-docx

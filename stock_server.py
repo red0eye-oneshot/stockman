@@ -76,6 +76,12 @@ try:
 except Exception:
     REPORTLAB = False
 
+try:
+    import docx as _docx
+    DOCX_OK = True
+except Exception:
+    DOCX_OK = False
+
 import smtplib
 from email.message import EmailMessage
 
@@ -120,7 +126,7 @@ if not EMAIL_USER or not EMAIL_APP_PASS:
 # 보안: API 키를 소스에 직접 적지 않음 → 환경변수(Render 배포용) 우선,
 # 없으면 로컬 gemini_config.json(.gitignore 처리, 깃허브에 올라가지 않음)에서 읽음.
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-GEMINI_MODEL   = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')
+GEMINI_MODEL   = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
 if not GEMINI_API_KEY:
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gemini_config.json'), 'r', encoding='utf-8') as _gf:
@@ -2007,21 +2013,24 @@ def summarize_with_gemini(name: str, code: str, today_pct, pnl_pct, frgn, has_di
         div_txt = "배당 있음" if has_div else "배당 없음"
         frgn_txt = f"외국인 지분율 {frgn}%" if frgn is not None else "외국인 지분율 정보 없음"
         prompt = (
-            f"너는 한국 주식 애널리스트야. 아래 종목의 최근 뉴스 헤드라인과 시세 정보를 보고, "
-            f"이 종목에 어떤 이슈가 있는지 핵심만 한국어 1~2문장으로 간결하게 해석해줘. "
-            f"추측성 투자 추천(사세요/파세요)은 하지 말고, 사실에 기반해 '무슨 일이 있었는지'와 '왜 그런 흐름인지'를 설명해줘.\n\n"
+            "너는 한국 주식 애널리스트야. 아래 종목의 최근 뉴스 헤드라인과 시세 정보를 근거로, "
+            "증권사 리포트 요약처럼 3~4문장 분량의 분석 코멘트를 한국어로 작성해줘.\n"
+            "- 무슨 사업을 하는 회사인지(알고 있는 경우 한 문장), 최근 어떤 이슈·공시·실적·수주·증권사 의견이 있었는지, "
+            "그것이 주가 흐름(상승/조정)에 어떤 의미인지, 향후 확인할 리스크나 체크포인트를 담아줘.\n"
+            "- 뉴스에 없는 구체적 수치(목표가, 실적 등)는 지어내지 말고, 모르면 언급하지 마.\n"
+            "- '사세요/파세요' 같은 직접적 매매 권유는 하지 마.\n\n"
             f"종목: {name}({code})\n"
             f"오늘 등락률: {today_pct:+.1f}%\n"
             f"누적 손익률: {pnl_pct if pnl_pct is not None else '정보없음'}\n"
             f"{frgn_txt}, {div_txt}\n"
             f"최근 뉴스:\n{news_lines}\n\n"
-            f"답변은 설명 문장만, 따옴표나 '답변:' 같은 머리말 없이 바로 작성해줘."
+            "답변은 분석 문장만, 머리말·따옴표·마크다운 없이 바로 작성해줘."
         )
         with _gemini_sem:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
             r = requests.post(url, json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 200},
+                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 600, "thinkingConfig": {"thinkingBudget": 0}},
             }, timeout=20)
         if r.status_code != 200:
             _log(f"[Gemini ERR] {code}: HTTP {r.status_code} {r.text[:200]}")
@@ -2214,7 +2223,7 @@ def collect_analysis_rows():
     _ok_cnt = sum(1 for d in data_map.values() if d.get('px') is not None)
     _log(f"[종합분석] 시세 조회 {_ok_cnt}/{len(all_real)} 성공 (보유코드 {len(held_codes)}개, 관심 {len(watch_only)}개)")
 
-    news_futs = {c: ex.submit(fetch_stock_news, c, 2) for c in all_real}
+    news_futs = {c: ex.submit(fetch_stock_news, c, 5) for c in all_real}
     news_map = {}
     for c, f in news_futs.items():
         try:
@@ -2297,7 +2306,7 @@ def generate_daily_xlsx(rows, wrows, date_str: str) -> str:
     ws.title = '종합분석'
     head_fill = openpyxl.styles.PatternFill('solid', fgColor='1565C0')
     head_font = openpyxl.styles.Font(color='FFFFFF', bold=True)
-    headers = ['구분', '종목명', '코드', '증권사', '매입가', '수량', '현재가', '오늘%', '누적%', '외국인%', '배당', 'AI 해석', '최근 뉴스']
+    headers = ['구분', '종목명', '코드', '증권사', '매입가', '수량', '현재가', '오늘%', '누적%', '외국인%', '배당', '분석 코멘트', '최근 뉴스']
     ws.append(headers)
     for c in ws[1]:
         c.fill = head_fill; c.font = head_font
@@ -2307,13 +2316,13 @@ def generate_daily_xlsx(rows, wrows, date_str: str) -> str:
     for r in rows:
         ws.append([r['bucket'], r['name'], r['code'], r['brkr'], r['buy'], r['qty'], r['px'],
                    round(r['today_pct'], 2), round(r['pnl_pct'], 2), r['frgn'], 'Y' if r['has_div'] else '',
-                   r.get('insight', ''), news_txt(r)])
+                   _commentary(r), news_txt(r)])
     ws.append([])
     ws.append(['── 관심종목(미보유) ──'])
     for r in wrows:
         ws.append([r['bucket'], r['name'], r['code'], '', '', '', r['px'],
                    round(r['today_pct'], 2), '', r['frgn'], 'Y' if r['has_div'] else '',
-                   r.get('insight', ''), news_txt(r)])
+                   _commentary(r), news_txt(r)])
     for i, w in enumerate([14, 16, 10, 10, 10, 8, 10, 8, 8, 9, 6, 45, 40], start=1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
     for row in ws.iter_rows(min_row=2):
@@ -2324,81 +2333,210 @@ def generate_daily_xlsx(rows, wrows, date_str: str) -> str:
     return fpath
 
 
+def _portfolio_totals(rows):
+    buy = sum(r['buy'] * r['qty'] for r in rows)
+    ev = sum(r['px'] * r['qty'] for r in rows)
+    pl = ev - buy
+    return buy, ev, pl, (pl / buy * 100 if buy else 0.0)
+
+
+def _commentary(r) -> str:
+    """종목별 분석 코멘트. Gemini 해석이 있으면 그것을, 없으면 뉴스+수급 기반 규칙형 문장을 반환."""
+    ins = (r.get('insight') or '').strip()
+    if ins:
+        return ins
+    parts = []
+    news = r.get('news') or []
+    if news:
+        parts.append("최근 뉴스: " + " / ".join(f"{n['title']}({n['date']})" for n in news[:3]) + ".")
+    t = r.get('today_pct') or 0
+    if t >= 3:
+        parts.append(f"오늘 {t:+.1f}% 강세로 단기 수급이 몰리는 모습.")
+    elif t <= -3:
+        parts.append(f"오늘 {t:+.1f}% 약세로 단기 매도 압력이 확인됨.")
+    f = r.get('frgn')
+    if f is not None:
+        if f >= 20:
+            parts.append(f"외국인 지분율 {f}%로 수급 기반이 탄탄한 편.")
+        elif f < 5:
+            parts.append(f"외국인 지분율 {f}%로 낮아 외부 수급 뒷받침은 약한 편.")
+    p = r.get('pnl_pct')
+    if p is not None:
+        if p <= -40:
+            parts.append(f"누적 {p:+.1f}%로 손실 폭이 커 비중 점검이 필요.")
+        elif p >= 20:
+            parts.append(f"누적 {p:+.1f}%로 수익 구간, 일부 차익실현 여부 점검 가능.")
+    return " ".join(parts) if parts else "특이 뉴스·수급 변화 없음."
+
+
+def _tag_text(r, held=True) -> str:
+    bits = []
+    if held and r.get('pnl_pct') is not None:
+        bits.append(f"누적 {r['pnl_pct']:+.1f}%")
+    bits.append(f"오늘 {r['today_pct']:+.1f}%")
+    if r.get('frgn') is not None:
+        bits.append(f"외인 {r['frgn']}%")
+    if r.get('has_div'):
+        bits.append("배당")
+    return "[" + ", ".join(bits) + "]"
+
+
+def _head_text(r, held=True) -> str:
+    if held:
+        return (f"{r['name']}({r['code']}, {r['brkr']}) - 매입 {r['buy']:,.0f}원 x {r['qty']}주 "
+                f"→ 현재 {r['px']:,.0f}원 {_tag_text(r)}")
+    return f"{r['name']}({r['code']}) - 현재 {r['px']:,.0f}원 {_tag_text(r, held=False)}"
+
+
+_BUCKET_ORDER = ['상승 흐름 기대', '유지/관망', '리스크 관리 필요', '보수적 접근 권고']
+_BUCKET_RGB = {'상승 흐름 기대': (0.1, 0.55, 0.25), '유지/관망': (0.75, 0.6, 0.0),
+               '리스크 관리 필요': (0.85, 0.45, 0.0), '보수적 접근 권고': (0.8, 0.15, 0.15)}
+_NOTICE = ("오늘 모멘텀, 외국인 지분율, 배당, 누적손익 점수로 1차 분류하고, 종목별 최근 뉴스·공시를 함께 해석해 "
+           "근거를 적었습니다. 투자 자문이 아닌 참고 자료이며, 실제 매매 판단은 본인 책임 하에 신중히 내리시기 바랍니다.")
+
+
+def _pdf_clean(text: str) -> str:
+    """HYSMyeongJo CID 폰트가 못 그리는 문자(가운뎃점, 줄임표, 긴 대시, 이모지 등)를 안전한 문자로 치환."""
+    for a, b in (('·', ','), ('ㆍ', ','), ('•', '-'), ('…', '...'), ('—', '-'), ('–', '-'),
+                 ('‘', "'"), ('’', "'"), ('“', '"'), ('”', '"'), (' ', ' ')):
+        text = text.replace(a, b)
+    return ''.join(ch for ch in text if ord(ch) < 0x1F000 and not (0x2600 <= ord(ch) <= 0x27BF))
+
+
+def _wrap_pdf(text, font, size, maxw):
+    text = _pdf_clean(text)
+    lines, cur = [], ''
+    for ch in text:
+        if ch == '\n':
+            lines.append(cur); cur = ''
+            continue
+        if _rl_pdfmetrics.stringWidth(cur + ch, font, size) > maxw:
+            lines.append(cur); cur = ch.lstrip()
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def generate_daily_pdf(rows, wrows, date_str: str) -> str:
+    """상세 분석 PDF: 요약 + 등급별 종목 + 종목별 분석 코멘트 + 번외(관심종목)."""
     if not REPORTLAB:
         raise RuntimeError('reportlab 미설치')
     fpath = os.path.join(SHARED_DIR, f'종합분석_{date_str}.pdf')
     c = _rl_canvas.Canvas(fpath, pagesize=_RL_A4)
     width, height = _RL_A4
     FONT = 'HYSMyeongJo-Medium'
+    LM, RM = 40, 40
+    maxw = width - LM - RM
     y = height - 50
 
-    def line(text, size=10, dy=16, bold_color=None):
+    def text_block(text, size=9, dy=13, color=(0, 0, 0), indent=0):
         nonlocal y
-        if y < 50:
-            c.showPage(); y = height - 50
-        c.setFont(FONT, size)
-        if bold_color:
-            c.setFillColorRGB(*bold_color)
-        else:
-            c.setFillColorRGB(0, 0, 0)
-        c.drawString(40, y, text)
-        y -= dy
+        for ln in _wrap_pdf(text, FONT, size, maxw - indent):
+            if y < 50:
+                c.showPage(); y = height - 50
+            c.setFont(FONT, size)
+            c.setFillColorRGB(*color)
+            c.drawString(LM + indent, y, ln)
+            y -= dy
 
-    line(f"보유/관심 종목 종합분석 ({date_str})", size=16)
-    line("오늘 모멘텀, 외국인 지분율, 배당, 누적손익을 종합 점수화한 자동 분석입니다.", size=9)
-    y -= 6
+    text_block("보유 · 관심 종목 종합분석", size=17, dy=24)
+    text_block(f"기준일: {date_str} (뉴스·공시 해석 반영)", size=10, dy=16, color=(0.3, 0.3, 0.3))
+    text_block("※ " + _NOTICE, size=8, dy=12, color=(0.4, 0.4, 0.4))
+    y -= 8
 
-    def wrap(text, width_chars=58):
-        words = text.split(' ')
-        cur, out = '', []
-        for w in words:
-            if len(cur) + len(w) + 1 > width_chars:
-                out.append(cur); cur = w
-            else:
-                cur = (cur + ' ' + w).strip()
-        if cur: out.append(cur)
-        return out
+    if rows:
+        b, e, p, pp = _portfolio_totals(rows)
+        text_block("포트폴리오 요약", size=12, dy=18, color=(0.08, 0.4, 0.75))
+        text_block(f"- 총 매입 {b:,.0f}원 → 총 평가 {e:,.0f}원 (총손익 {p:+,.0f}원, {pp:+.1f}%)", size=10, dy=15)
+        y -= 6
 
-    def detail_lines(r):
-        insight = (r.get('insight') or '').strip()
-        news = r.get('news') or []
-        if insight:
-            for i, seg in enumerate(wrap(insight)):
-                prefix = "    [AI] " if i == 0 else "         "
-                line(f"{prefix}{seg}", size=8.5, dy=13, bold_color=(0.1, 0.45, 0.2))
-        elif news:
-            for n in news:
-                t = n['title']
-                if len(t) > 48:
-                    t = t[:48] + '...'
-                line(f"    - {t} ({n['date']})", size=8, dy=13, bold_color=(0.4, 0.4, 0.4))
-        else:
-            line("    (최근 뉴스 없음)", size=8, dy=13, bold_color=(0.55, 0.55, 0.55))
-
-    cur_bucket = None
-    for r in rows:
-        if r['bucket'] != cur_bucket:
-            cur_bucket = r['bucket']
-            y -= 6
-            line(f"● {cur_bucket}", size=12, bold_color=(0.08, 0.4, 0.75))
-        txt = (f"{r['name']}({r['code']}, {r['brkr']}) 매입 {r['buy']:,.0f}x{r['qty']} → "
-               f"현재 {r['px']:,.0f} [오늘 {r['today_pct']:+.1f}% 누적 {r['pnl_pct']:+.1f}% "
-               f"외인 {r['frgn'] if r['frgn'] is not None else '-'}%]")
-        line(txt, size=9)
-        detail_lines(r)
+    for bk in _BUCKET_ORDER:
+        grp = [r for r in rows if r['bucket'] == bk]
+        if not grp:
+            continue
+        y -= 6
+        text_block(f"● {bk} ({len(grp)}종목)", size=12, dy=18, color=_BUCKET_RGB.get(bk, (0, 0, 0)))
+        for r in grp:
+            text_block("- " + _head_text(r), size=9.5, dy=14)
+            text_block(_commentary(r), size=9, dy=13, color=(0.25, 0.25, 0.25), indent=14)
+            y -= 5
 
     if wrows:
-        y -= 10
-        line("[번외] 관심종목 (미보유)", size=12, bold_color=(0, 0.5, 0.55))
+        y -= 8
+        text_block("[번외] 관심종목 (미보유)", size=12, dy=18, color=(0, 0.5, 0.55))
+        text_block("매입 이력이 없어 손익은 제외하고, 모멘텀·수급·뉴스만으로 분류했습니다.", size=8.5, dy=13, color=(0.4, 0.4, 0.4))
         for r in wrows:
-            txt = f"{r['name']}({r['code']}) 현재 {r['px']:,.0f} [오늘 {r['today_pct']:+.1f}% 외인 {r['frgn'] if r['frgn'] is not None else '-'}%] / {r['bucket']}"
-            line(txt, size=9)
-            detail_lines(r)
+            text_block("- " + _head_text(r, held=False) + f" / {r['bucket']}", size=9.5, dy=14)
+            text_block(_commentary(r), size=9, dy=13, color=(0.25, 0.25, 0.25), indent=14)
+            y -= 5
 
-    y -= 14
-    line("※ 투자 자문이 아닌 참고 자료이며, 실제 매매 판단은 본인 책임 하에 신중히 내리시기 바랍니다.", size=8)
+    y -= 10
+    text_block("참고", size=11, dy=16, color=(0.08, 0.4, 0.75))
+    text_block("- 공시·뉴스 내용은 조사 시점 기준이며, 이후 추가 공시나 시황 변화로 상황이 달라질 수 있습니다.", size=8.5, dy=12)
+    text_block("- 이 자료는 투자 자문이 아닌 참고 자료이며, 실제 매수·매도 결정은 본인 판단과 책임 하에 하시기 바랍니다.", size=8.5, dy=12)
     c.save()
+    return fpath
+
+
+def generate_daily_docx(rows, wrows, date_str: str) -> str:
+    """상세 분석 Word 문서 (샘플 '보유종목_관심종목_종합분석_상세.docx' 구성과 동일)."""
+    if not DOCX_OK:
+        raise RuntimeError('python-docx 미설치')
+    from docx.shared import Pt, RGBColor
+    from docx.oxml.ns import qn
+    doc = _docx.Document()
+    st = doc.styles['Normal']
+    st.font.name = '맑은 고딕'
+    st.font.size = Pt(10)
+    st.element.rPr.rFonts.set(qn('w:eastAsia'), '맑은 고딕')
+
+    def para(text, size=10, bold=False, color=None, indent=0):
+        p = doc.add_paragraph()
+        run = p.add_run(text)
+        run.font.size = Pt(size)
+        run.bold = bold
+        run.font.name = '맑은 고딕'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), '맑은 고딕')
+        if color:
+            run.font.color.rgb = RGBColor(*color)
+        if indent:
+            p.paragraph_format.left_indent = Pt(indent)
+        p.paragraph_format.space_after = Pt(3)
+        return p
+
+    para("보유 · 관심 종목 종합분석 (뉴스·공시 해석 반영판)", size=18, bold=True)
+    para(f"기준일: {date_str}", size=10, color=(90, 90, 90))
+    para("※ " + _NOTICE, size=9, color=(110, 110, 110))
+
+    if rows:
+        b, e, p, pp = _portfolio_totals(rows)
+        para("📊 포트폴리오 요약", size=13, bold=True, color=(21, 101, 192))
+        para(f"총 매입 {b:,.0f}원 → 총 평가 {e:,.0f}원 (총손익 {p:+,.0f}원, {pp:+.1f}%)", size=10.5)
+
+    emoji = {'상승 흐름 기대': '🟢', '유지/관망': '🟡', '리스크 관리 필요': '🟠', '보수적 접근 권고': '🔴'}
+    for bk in _BUCKET_ORDER:
+        grp = [r for r in rows if r['bucket'] == bk]
+        if not grp:
+            continue
+        para(f"{emoji.get(bk, '')} {bk} ({len(grp)}종목)", size=13, bold=True)
+        for r in grp:
+            para(_head_text(r), size=10, bold=True)
+            para(_commentary(r), size=9.5, color=(60, 60, 60), indent=14)
+
+    if wrows:
+        para("⭐ 번외 종목 (관심종목 — 미보유)", size=13, bold=True, color=(0, 128, 140))
+        para("매입 이력이 없어 손익은 제외하고, 모멘텀·수급·뉴스만으로 분류했습니다.", size=9, color=(110, 110, 110))
+        for r in wrows:
+            para(_head_text(r, held=False) + f" / {r['bucket']}", size=10, bold=True)
+            para(_commentary(r), size=9.5, color=(60, 60, 60), indent=14)
+
+    para("📌 참고", size=12, bold=True, color=(21, 101, 192))
+    para("공시·뉴스 내용은 조사 시점 기준이며, 이후 추가 공시나 시황 변화로 상황이 달라질 수 있습니다.", size=9)
+    para("이 자료는 투자 자문이 아닌 참고 자료이며, 실제 매수·매도 결정은 본인 판단과 책임 하에 하시기 바랍니다.", size=9)
+    fpath = os.path.join(SHARED_DIR, f'종합분석_{date_str}.docx')
+    doc.save(fpath)
     return fpath
 
 
@@ -2472,43 +2610,28 @@ def _daily_schedule_worker():
 
 
 def build_telegram_analysis_text(rows: list, wrows: list) -> str:
-    """종합분석(상승 흐름 기대/유지관망/리스크관리/보수적 접근) 내용을 텔레그램 텍스트로 변환."""
-    def pct(n): return f"{n:+.1f}%"
-    def won(n): return f"{n:,.0f}원"
-
+    """종합분석 상세 내용을 텔레그램 텍스트로 변환 (요약 + 등급별 종목 + 종목별 분석 코멘트)."""
     today = datetime.now().strftime('%Y-%m-%d (%a)')
-    parts = [f"📊 보유·관심종목 종합분석\n{today} 기준\n" + "─"*20]
+    parts = [f"📊 보유·관심종목 종합분석\n기준일 {today}\n" + "─" * 20]
+    if rows:
+        b, e, p, pp = _portfolio_totals(rows)
+        parts.append(f"\n총 매입 {b:,.0f}원 → 총 평가 {e:,.0f}원\n총손익 {p:+,.0f}원 ({pp:+.1f}%)")
 
-    cur = None
-    for r in rows:
-        if r['bucket'] != cur:
-            cur = r['bucket']
-            emoji = {'상승 흐름 기대': '🟢', '유지/관망': '🟡', '리스크 관리 필요': '🟠', '보수적 접근 권고': '🔴'}.get(cur, '•')
-            parts.append(f"\n{emoji} {cur}")
-        frgn_txt = f" 외인 {r['frgn']}%" if r['frgn'] is not None else ''
-        line = (f"· {r['name']}({r['code']}, {r['brkr']}) 매입 {won(r['buy'])}x{r['qty']} → "
-                f"현재 {won(r['px'])} [오늘 {pct(r['today_pct'])} 누적 {pct(r['pnl_pct'])}{frgn_txt}]")
-        parts.append(line)
-        insight = (r.get('insight') or '').strip()
-        if insight:
-            parts.append(f"    🤖 {insight}")
-        else:
-            for n in (r.get('news') or [])[:2]:
-                parts.append(f"    📰 {n['title']} ({n['date']})")
+    emoji = {'상승 흐름 기대': '🟢', '유지/관망': '🟡', '리스크 관리 필요': '🟠', '보수적 접근 권고': '🔴'}
+    for bk in _BUCKET_ORDER:
+        grp = [r for r in rows if r['bucket'] == bk]
+        if not grp:
+            continue
+        parts.append(f"\n{emoji.get(bk, '•')} {bk} ({len(grp)}종목)")
+        for r in grp:
+            parts.append(f"• {_head_text(r)}")
+            parts.append(f"   {_commentary(r)}")
 
     if wrows:
         parts.append("\n⭐ 번외 종목 (관심종목, 미보유)")
-        cur = None
         for r in wrows:
-            frgn_txt = f" 외인 {r['frgn']}%" if r['frgn'] is not None else ''
-            line = f"· {r['name']}({r['code']}) 현재 {won(r['px'])} [오늘 {pct(r['today_pct'])}{frgn_txt}] — {r['bucket']}"
-            parts.append(line)
-            insight = (r.get('insight') or '').strip()
-            if insight:
-                parts.append(f"    🤖 {insight}")
-            else:
-                for n in (r.get('news') or [])[:2]:
-                    parts.append(f"    📰 {n['title']} ({n['date']})")
+            parts.append(f"• {_head_text(r, held=False)} / {r['bucket']}")
+            parts.append(f"   {_commentary(r)}")
 
     parts.append("\n※ 투자 자문이 아닌 참고 자료이며, 실제 매매 판단은 본인 책임 하에 신중히 내리시기 바랍니다.")
     return "\n".join(parts)
@@ -2538,6 +2661,12 @@ def _run_daily_files_job(rows=None, wrows=None) -> dict:
         paths.append(pp)
     except Exception as e:
         _log(f"[종합분석ERR] pdf 생성 실패: {e}")
+    try:
+        dp = generate_daily_docx(rows, wrows, date_str)
+        out['docx'] = os.path.basename(dp)
+        paths.append(dp)
+    except Exception as e:
+        _log(f"[종합분석ERR] docx 생성 실패: {e}")
 
     if paths:
         subject = f"[주식트래커] {date_str} 보유·관심종목 종합분석"
