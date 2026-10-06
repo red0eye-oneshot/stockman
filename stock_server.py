@@ -2001,6 +2001,7 @@ def fetch_stock_news(code: str, limit: int = 2) -> list:
 
 _gemini_lock = threading.Lock()
 _gemini_last = [0.0]
+_gemini_dead = [False]   # 키 오류 시 True → 같은 실행에서 더 이상 호출하지 않음
 _GEMINI_MIN_GAP = 6.5   # 무료 티어 분당 호출 제한(약 10회) 보호: 호출 간 최소 간격(초)
 
 
@@ -2015,7 +2016,7 @@ def _gemini_wait_turn():
 def summarize_with_gemini(name: str, code: str, today_pct, pnl_pct, frgn, has_div: bool, news: list) -> str:
     """Gemini + Google 검색(grounding)으로 종목의 최근 공시/뉴스/증권사 리포트를 직접 찾아 분석 코멘트를 받아온다.
     API 키 미설정이거나 호출 실패 시 빈 문자열 반환 (절대 예외를 밖으로 던지지 않음)."""
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEY or _gemini_dead[0]:
         return ''
     try:
         news_lines = "\n".join(f"- {n['title']} ({n['date']})" for n in (news or [])) or "(수집된 뉴스 없음)"
@@ -2047,6 +2048,10 @@ def summarize_with_gemini(name: str, code: str, today_pct, pnl_pct, frgn, has_di
             if r.status_code in (429, 500, 503):
                 time.sleep(15 * (attempt + 1))
                 continue
+            if r.status_code in (400, 401, 403):
+                # 키가 잘못됐으면 나머지 종목도 전부 실패하므로 이번 실행에서는 AI 호출을 중단(PDF는 규칙 문장으로 계속 생성)
+                _gemini_dead[0] = True
+                _log("[Gemini] API 키 오류로 이번 실행의 AI 분석을 건너뜀 (Render 환경변수 GEMINI_API_KEY 확인 필요)")
             return ''
         if r is None or r.status_code != 200:
             return ''
