@@ -2791,6 +2791,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/api/send_daily_files':
             # 종합분석 엑셀/PDF만 즉시 생성+이메일 발송 (수동 테스트용)
             # 종목별 AI 분석(검색 포함)에 수 분 걸리므로 백그라운드로 실행하고 즉시 응답
+            _pf0 = load_portfolio()
+            if not (_pf0.get('bp') or _pf0.get('watch')):
+                self._serve_json({'ok': False, 'error': '클라우드 포트폴리오가 비어 있음',
+                                  'detail': '로컬 앱(stock_tracker.vbs)을 열어 데이터를 올린 뒤 다시 실행하세요.'})
+                return
             def _bg():
                 try:
                     res = _run_daily_files_job()
