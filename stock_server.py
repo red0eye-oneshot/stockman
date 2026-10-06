@@ -3042,6 +3042,26 @@ def get_local_ip() -> str:
         return '알 수 없음'
 
 
+CLOUD_URL = 'https://stockman-10k4.onrender.com'
+CLOUD_KEY = 'stockman2026'
+
+
+def _local_to_cloud_sync_worker():
+    """로컬 서버 전용: 브라우저 탭 없이도 5분마다 클라우드 상태를 확인해서, 비어 있으면 로컬 portfolio.json 을 업로드."""
+    time.sleep(15)
+    while True:
+        try:
+            local = load_portfolio()
+            if local.get('bp'):
+                r = requests.get(f"{CLOUD_URL}/api/portfolio", params={'key': CLOUD_KEY}, timeout=90)
+                if r.status_code == 200 and not (r.json() or {}).get('bp'):
+                    r2 = requests.post(f"{CLOUD_URL}/api/portfolio", params={'key': CLOUD_KEY}, json=local, timeout=90)
+                    _log(f"[클라우드동기화] 클라우드가 비어 있어 로컬 데이터 업로드 → HTTP {r2.status_code}")
+        except Exception as e:
+            _log(f"[클라우드동기화] 실패(다음 주기에 재시도): {type(e).__name__}")
+        time.sleep(300)
+
+
 def main():
     local_ip = get_local_ip()
     is_cloud = bool(os.environ.get('PORT'))
@@ -3076,6 +3096,9 @@ def main():
     # (로컬 PC는 꺼져있는 시간이 많아 중복 발송 방지 차원에서 제외)
     if is_cloud:
         threading.Thread(target=_daily_schedule_worker, daemon=True).start()
+    else:
+        # 로컬 PC 서버가 켜져 있는 동안, 클라우드 포트폴리오가 비어 있으면(재배포로 초기화됨) 자동으로 올려준다.
+        threading.Thread(target=_local_to_cloud_sync_worker, daemon=True).start()
 
     srv = ThreadedServer(('', PORT), Handler)
 
