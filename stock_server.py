@@ -1999,41 +1999,56 @@ def fetch_stock_news(code: str, limit: int = 2) -> list:
         return []
 
 
-_gemini_sem = threading.Semaphore(3)  # 무료 티어 RPM 보호용 동시 호출 제한
+_gemini_lock = threading.Lock()
+_gemini_last = [0.0]
+_GEMINI_MIN_GAP = 6.5   # 무료 티어 분당 호출 제한(약 10회) 보호: 호출 간 최소 간격(초)
+
+
+def _gemini_wait_turn():
+    with _gemini_lock:
+        gap = time.time() - _gemini_last[0]
+        if gap < _GEMINI_MIN_GAP:
+            time.sleep(_GEMINI_MIN_GAP - gap)
+        _gemini_last[0] = time.time()
+
 
 def summarize_with_gemini(name: str, code: str, today_pct, pnl_pct, frgn, has_div: bool, news: list) -> str:
-    """종목의 시세 요약 + 최근 뉴스 제목들을 Gemini에게 넘겨 1~2문장 해석/요약을 받아온다.
+    """Gemini + Google 검색(grounding)으로 종목의 최근 공시/뉴스/증권사 리포트를 직접 찾아 분석 코멘트를 받아온다.
     API 키 미설정이거나 호출 실패 시 빈 문자열 반환 (절대 예외를 밖으로 던지지 않음)."""
     if not GEMINI_API_KEY:
         return ''
-    if not news:
-        return ''
     try:
-        news_lines = "\n".join(f"- {n['title']} ({n['date']})" for n in news)
+        news_lines = "\n".join(f"- {n['title']} ({n['date']})" for n in (news or [])) or "(수집된 뉴스 없음)"
         div_txt = "배당 있음" if has_div else "배당 없음"
         frgn_txt = f"외국인 지분율 {frgn}%" if frgn is not None else "외국인 지분율 정보 없음"
         prompt = (
-            "너는 한국 주식 애널리스트야. 아래 종목의 최근 뉴스 헤드라인과 시세 정보를 근거로, "
-            "증권사 리포트 요약처럼 3~4문장 분량의 분석 코멘트를 한국어로 작성해줘.\n"
-            "- 무슨 사업을 하는 회사인지(알고 있는 경우 한 문장), 최근 어떤 이슈·공시·실적·수주·증권사 의견이 있었는지, "
-            "그것이 주가 흐름(상승/조정)에 어떤 의미인지, 향후 확인할 리스크나 체크포인트를 담아줘.\n"
-            "- 뉴스에 없는 구체적 수치(목표가, 실적 등)는 지어내지 말고, 모르면 언급하지 마.\n"
-            "- '사세요/파세요' 같은 직접적 매매 권유는 하지 마.\n\n"
-            f"종목: {name}({code})\n"
-            f"오늘 등락률: {today_pct:+.1f}%\n"
-            f"누적 손익률: {pnl_pct if pnl_pct is not None else '정보없음'}\n"
-            f"{frgn_txt}, {div_txt}\n"
-            f"최근 뉴스:\n{news_lines}\n\n"
-            "답변은 분석 문장만, 머리말·따옴표·마크다운 없이 바로 작성해줘."
+            f"한국 상장 종목 '{name}'(종목코드 {code})에 대해 Google 검색으로 최근 1~2개월의 "
+            "공시, 뉴스, 증권사 리포트(투자의견·목표주가)를 직접 찾아보고, 증권사 리포트 요약처럼 분석 코멘트를 작성해줘.\n"
+            "반드시 포함: (1) 어떤 사업을 하는 회사인지 한 문장, (2) 최근 확인된 핵심 이슈(공시·수주·실적·M&A·임상·전환사채 등)와 날짜, "
+            "(3) 증권사 의견이나 목표주가가 검색되면 증권사명과 수치를 명시(없으면 생략), (4) 이것이 주가에 갖는 의미와 향후 체크포인트/리스크.\n"
+            "규칙: 검색으로 확인되지 않은 수치·사실은 쓰지 말 것. '사세요/파세요' 식의 직접 권유 금지. "
+            "4~6문장, 한국어, 머리말·마크다운·글머리표·출처표기 없이 문장만.\n\n"
+            f"[참고 시세 정보] 오늘 등락률 {today_pct:+.1f}%, 누적 손익률 {pnl_pct if pnl_pct is not None else '정보없음'}, {frgn_txt}, {div_txt}\n"
+            f"[참고 뉴스 헤드라인]\n{news_lines}"
         )
-        with _gemini_sem:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-            r = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 600, "thinkingConfig": {"thinkingBudget": 0}},
-            }, timeout=20)
-        if r.status_code != 200:
-            _log(f"[Gemini ERR] {code}: HTTP {r.status_code} {r.text[:200]}")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200},
+        }
+        r = None
+        for attempt in range(3):
+            _gemini_wait_turn()
+            r = requests.post(url, json=body, timeout=60)
+            if r.status_code == 200:
+                break
+            _log(f"[Gemini ERR] {code}: HTTP {r.status_code} (시도 {attempt+1}) " + r.text[:160].replace(GEMINI_API_KEY, '***'))
+            if r.status_code in (429, 500, 503):
+                time.sleep(15 * (attempt + 1))
+                continue
+            return ''
+        if r is None or r.status_code != 200:
             return ''
         j = r.json()
         cands = j.get('candidates') or []
@@ -2041,9 +2056,10 @@ def summarize_with_gemini(name: str, code: str, today_pct, pnl_pct, frgn, has_di
             return ''
         parts = (cands[0].get('content') or {}).get('parts') or []
         text = "".join(p.get('text', '') for p in parts).strip()
+        text = re.sub(r'\[\d+(?:,\s*\d+)*\]', '', text).replace('**', '').strip()
         return text
     except Exception as e:
-        _log(f"[Gemini ERR] {code}: {type(e).__name__}: {e}")
+        _log(f"[Gemini ERR] {code}: {type(e).__name__}: " + str(e).replace(GEMINI_API_KEY, '***'))
         return ''
 
 
@@ -2274,23 +2290,27 @@ def collect_analysis_rows():
         })
     wrows.sort(key=lambda r: -r['score'])
 
-    # Gemini AI 해석/요약 (API 키 설정된 경우에만 동작, 뉴스가 있는 종목만 대상)
+    # Gemini AI 해석/요약 (Google 검색 grounding, API 키 설정된 경우에만 동작)
     if GEMINI_API_KEY:
         all_entries = rows + wrows
-        insight_futs = {}
+        # 같은 종목이 여러 증권사에 있으면(큐렉소 등) 한 번만 조회해서 재사용
+        by_code = {}
         for r in all_entries:
-            if r.get('news'):
-                insight_futs[id(r)] = (r, ex.submit(
-                    summarize_with_gemini, r['name'], r['code'], r['today_pct'],
-                    r.get('pnl_pct'), r['frgn'], r['has_div'], r['news']))
-        for key, (r, f) in insight_futs.items():
-            try:
-                r['insight'] = f.result(timeout=25)
-            except Exception as e:
-                _log(f"[Gemini ERR] {r['code']} 결과 수신 실패: {e}")
-                r['insight'] = ''
+            by_code.setdefault(r['code'], r)
+        with ThreadPoolExecutor(max_workers=3) as gex:
+            gfuts = {c: gex.submit(summarize_with_gemini, r['name'], r['code'], r['today_pct'],
+                                   r.get('pnl_pct'), r['frgn'], r['has_div'], r.get('news') or [])
+                     for c, r in by_code.items()}
+            insight_by_code = {}
+            for c, f in gfuts.items():
+                try:
+                    insight_by_code[c] = f.result(timeout=600)
+                except Exception as e:
+                    _log(f"[Gemini ERR] {c} 결과 수신 실패: {e}")
+                    insight_by_code[c] = ''
         for r in all_entries:
-            r.setdefault('insight', '')
+            r['insight'] = insight_by_code.get(r['code'], '')
+        _log(f"[Gemini] 분석 코멘트 {sum(1 for v in insight_by_code.values() if v)}/{len(insight_by_code)} 종목 생성")
     else:
         for r in rows + wrows:
             r['insight'] = ''
@@ -2638,7 +2658,7 @@ def build_telegram_analysis_text(rows: list, wrows: list) -> str:
 
 
 def _run_daily_files_job(rows=None, wrows=None) -> dict:
-    """종합분석 엑셀/PDF를 날짜별로 생성하고 이메일로 발송. /api/send_report, /api/send_daily_files 공용."""
+    """종합분석 PDF를 날짜별로 생성하고 이메일로 발송. /api/send_report, /api/send_daily_files 공용."""
     date_str = datetime.now().strftime('%Y-%m-%d')
     if rows is None or wrows is None:
         rows, wrows = collect_analysis_rows()
@@ -2647,30 +2667,19 @@ def _run_daily_files_job(rows=None, wrows=None) -> dict:
         return {'ok': False, 'error': '보유/관심 종목 데이터 없음',
                 'detail': f"portfolio bp={len(_pf.get('bp', {}) or {})}개, qty={len(_pf.get('qty', {}) or {})}개, watch={len(_pf.get('watch', []) or [])}개 (0이면 로컬앱 미동기화, 아니면 시세조회 실패)"}
 
-    out = {'ok': False, 'xlsx': None, 'pdf': None, 'emailed': False}
+    out = {'ok': False, 'pdf': None, 'emailed': False}
     paths = []
-    try:
-        xp = generate_daily_xlsx(rows, wrows, date_str)
-        out['xlsx'] = os.path.basename(xp)
-        paths.append(xp)
-    except Exception as e:
-        _log(f"[종합분석ERR] xlsx 생성 실패: {e}")
     try:
         pp = generate_daily_pdf(rows, wrows, date_str)
         out['pdf'] = os.path.basename(pp)
         paths.append(pp)
     except Exception as e:
         _log(f"[종합분석ERR] pdf 생성 실패: {e}")
-    try:
-        dp = generate_daily_docx(rows, wrows, date_str)
-        out['docx'] = os.path.basename(dp)
-        paths.append(dp)
-    except Exception as e:
-        _log(f"[종합분석ERR] docx 생성 실패: {e}")
+        out['error'] = f"pdf 생성 실패: {e}"
 
     if paths:
         subject = f"[주식트래커] {date_str} 보유·관심종목 종합분석"
-        body = (f"{date_str} 기준 보유·관심종목 종합분석 파일을 첨부합니다.\n"
+        body = (f"{date_str} 기준 보유·관심종목 종합분석 PDF를 첨부합니다.\n"
                 f"보유 {len(rows)}건 · 관심 {len(wrows)}건\n\n"
                 f"※ 투자 자문이 아닌 참고 자료입니다.")
         out['emailed'] = send_email_with_attachments(subject, body, paths)
@@ -2769,29 +2778,28 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/api/send_report':
             # 종합분석(상승 흐름 기대/유지관망/리스크관리/보수적 접근) 내용을 텔레그램 + 이메일(엑셀/PDF)로 발송
             # (예약 작업이 매일 호출. 예전의 개별 종목 뉴스 나열 리포트는 더 이상 사용하지 않음)
-            try:
-                rows, wrows = collect_analysis_rows()
-                text = build_telegram_analysis_text(rows, wrows)
-                sent = send_telegram_message(text)
-                result = {'ok': sent, 'chars': len(text)}
-            except Exception as e:
-                _log(f"[리포트ERR] /api/send_report: {type(e).__name__}: {e}")
-                result = {'ok': False, 'error': str(e)}
-                rows = wrows = None
-            try:
-                result['files'] = _run_daily_files_job(rows, wrows)
-            except Exception as e:
-                _log(f"[종합분석ERR] send_report 연계 실패: {type(e).__name__}: {e}")
-                result['files'] = {'ok': False, 'error': str(e)}
-            self._serve_json(result)
+            def _bg_report():
+                try:
+                    rows, wrows = collect_analysis_rows()
+                    send_telegram_message(build_telegram_analysis_text(rows, wrows))
+                    _run_daily_files_job(rows, wrows)
+                except Exception as e:
+                    _log(f"[리포트ERR] /api/send_report: {type(e).__name__}: {e}")
+            threading.Thread(target=_bg_report, daemon=True).start()
+            self._serve_json({'ok': True, 'started': True})
 
         elif path == '/api/send_daily_files':
             # 종합분석 엑셀/PDF만 즉시 생성+이메일 발송 (수동 테스트용)
-            try:
-                self._serve_json(_run_daily_files_job())
-            except Exception as e:
-                _log(f"[종합분석ERR] /api/send_daily_files: {type(e).__name__}: {e}")
-                self._serve_json({'ok': False, 'error': str(e)})
+            # 종목별 AI 분석(검색 포함)에 수 분 걸리므로 백그라운드로 실행하고 즉시 응답
+            def _bg():
+                try:
+                    res = _run_daily_files_job()
+                    _log(f"[종합분석] 수동 실행 결과: {res}")
+                except Exception as e:
+                    _log(f"[종합분석ERR] /api/send_daily_files: {type(e).__name__}: {e}")
+            threading.Thread(target=_bg, daemon=True).start()
+            self._serve_json({'ok': True, 'started': True,
+                              'msg': '생성 시작됨. 종목 수에 따라 3~6분 뒤 메일과 /files 페이지에서 PDF를 확인하세요.'})
 
         elif path.startswith('/api/search/'):
             query = unquote(path.split('/api/search/', 1)[-1].strip('/'))
