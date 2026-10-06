@@ -2187,15 +2187,34 @@ def collect_analysis_rows():
 
     all_real = list(real_codes | set(watch_only))
     ex = _shared_pool
-    futs = {c: ex.submit(get_stock_data, c) for c in all_real}
-    news_futs = {c: ex.submit(fetch_stock_news, c, 2) for c in all_real}
+
+    # 동시 요청이 너무 많으면 네이버가 차단/지연시켜 전부 실패할 수 있어 소규모 풀로 제한 + 재시도
+    def _fetch_with_retry(c):
+        last = {'ok': False}
+        for attempt in range(3):
+            try:
+                d = get_stock_data(c)
+                if d and d.get('px') is not None:
+                    return d
+                last = d or last
+            except Exception as e:
+                _log(f"[종합분석] get_stock_data({c}) 시도{attempt+1} 실패: {type(e).__name__}: {e}")
+            time.sleep(1.0 + attempt)
+        return last
+
     data_map = {}
-    for c, f in futs.items():
-        try:
-            data_map[c] = f.result(timeout=15)
-        except Exception as e:
-            _log(f"[종합분석] get_stock_data({c}) 실패: {e}")
-            data_map[c] = {'ok': False}
+    with ThreadPoolExecutor(max_workers=5) as small_ex:
+        sfuts = {c: small_ex.submit(_fetch_with_retry, c) for c in all_real}
+        for c, f in sfuts.items():
+            try:
+                data_map[c] = f.result(timeout=90)
+            except Exception as e:
+                _log(f"[종합분석] get_stock_data({c}) 최종 실패: {e}")
+                data_map[c] = {'ok': False}
+    _ok_cnt = sum(1 for d in data_map.values() if d.get('px') is not None)
+    _log(f"[종합분석] 시세 조회 {_ok_cnt}/{len(all_real)} 성공 (보유코드 {len(held_codes)}개, 관심 {len(watch_only)}개)")
+
+    news_futs = {c: ex.submit(fetch_stock_news, c, 2) for c in all_real}
     news_map = {}
     for c, f in news_futs.items():
         try:
@@ -2501,7 +2520,9 @@ def _run_daily_files_job(rows=None, wrows=None) -> dict:
     if rows is None or wrows is None:
         rows, wrows = collect_analysis_rows()
     if not rows and not wrows:
-        return {'ok': False, 'error': '보유/관심 종목 데이터 없음'}
+        _pf = load_portfolio()
+        return {'ok': False, 'error': '보유/관심 종목 데이터 없음',
+                'detail': f"portfolio bp={len(_pf.get('bp', {}) or {})}개, qty={len(_pf.get('qty', {}) or {})}개, watch={len(_pf.get('watch', []) or [])}개 (0이면 로컬앱 미동기화, 아니면 시세조회 실패)"}
 
     out = {'ok': False, 'xlsx': None, 'pdf': None, 'emailed': False}
     paths = []
